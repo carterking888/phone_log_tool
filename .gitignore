@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+dist/
+build/
+*.spec
+!adb_tool.spec
+.workbuddy/
+
+# Cython 中间产物（setup_pyd.py 生成；mac 上是 .so）
+core/*.c
+core/*.pyd
+core/*.so
+core/*.py.src
+
+# macOS 构建环境（build_mac.sh 自建）
+.venv_mac/
+
+# 诊断日志（ADB_TOOL_DIAG=1 时产生）
+*.log
+diag_verify_*.log

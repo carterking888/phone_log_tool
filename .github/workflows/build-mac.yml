@@ -1,0 +1,93 @@
+name: Build macOS App
+
+# 没有 mac 机器时的打包路径：PyInstaller 不能交叉编译，
+# 借 GitHub Actions 的 mac runner 产出真正的 .app。
+#
+# 用法：Actions 页 -> Build macOS App -> Run workflow（可只选一种架构）
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: '构建架构'
+        required: true
+        default: 'both'
+        type: choice
+        options: [both, arm64, x86_64]
+      dmg:
+        description: '额外产出 dmg'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-14+ 是 Apple Silicon(arm64)；macos-13 是最后一档 Intel(x86_64)
+          - os: macos-14
+            arch: arm64
+          - os: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    # 单选架构时跳过另一个 job
+    if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          uname -m
+          xcode-select -p
+
+      - name: Build .app
+        run: |
+          chmod +x build_mac.sh
+          if [ "${{ github.event.inputs.dmg }}" = "true" ]; then
+            ./build_mac.sh --dmg
+          else
+            ./build_mac.sh
+          fi
+
+      - name: Smoke test (app 能启动 + 内置 server 可达)
+        run: |
+          # .app 里的可执行文件在 Contents/MacOS
+          EXE="dist/adb_tool.app/Contents/MacOS/adb_tool"
+          test -x "$EXE" || { echo "[错误] 找不到可执行文件"; exit 1; }
+          # 后台拉起 app（无 GUI 会话，只看进程能否活过 CLR/objc 初始化）
+          "$EXE" &
+          PID=$!
+          sleep 15
+          if kill -0 "$PID" 2>/dev/null; then
+            echo "进程存活 15s -> OK"
+            kill "$PID" || true
+          else
+            echo "[错误] 进程 15s 内退出（依赖缺失或签名问题）"
+            exit 1
+          fi
+          # pyobjc / web 资源是否进包
+          ls dist/adb_tool.app/Contents/MacOS/_internal/core/*.so | wc -l
+          test -f dist/adb_tool.app/Contents/MacOS/_internal/web/index.html
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: adb_tool-macos-${{ matrix.arch }}
+          path: dist/adb_tool_macos_*.zip
+          if-no-files-found: error
+
+      - name: Upload dmg
+        if: ${{ github.event.inputs.dmg == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: adb_tool-macos-${{ matrix.arch }}-dmg
+          path: dist/adb_tool_macos_*.dmg
+          if-no-files-found: error

@@ -1,0 +1,1004 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADB 日志与设备调试工具</title>
+<link rel="stylesheet" href="vendor/layui/css/layui.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body @vue:mounted="init()">
+<div id="app" v-cloak>
+
+  <!-- ============================== 顶栏 ============================== -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand__logo">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M17.6 9.48l1.84-3.18c.16-.31.04-.69-.26-.85a.637.637 0 00-.83.22l-1.88 3.24a11.43 11.43 0 00-8.94 0L5.65 5.67a.637.637 0 00-.83-.22c-.3.16-.42.54-.26.85L6.4 9.48A10.67 10.67 0 001 18h22a10.67 10.67 0 00-5.4-8.52zM7 15.25a1.25 1.25 0 110-2.5 1.25 1.25 0 010 2.5zm10 0a1.25 1.25 0 110-2.5 1.25 1.25 0 010 2.5z"/></svg>
+      </span>
+      <div class="brand__txt">
+        <div class="brand__title">ADB 日志与设备调试工具</div>
+        <div class="brand__sub">Android Debug Bridge · v{{ env.appVersion }}</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <a class="nav__item" v-for="n in navs" :key="n.key"
+         :class="route===n.key?'is-active':''" @click="go(n.key)">{{ n.label }}</a>
+    </nav>
+
+    <div class="topbar__right">
+      <div class="devsel">
+        <span class="dot" :class="devices.onlineList.length?'ok':'bad'"></span>
+        <select v-model="currentSerial" @change="onDeviceChange()">
+          <option v-for="d in devices.onlineList" :key="d.serial" :value="d.serial">{{ d.model }} · {{ d.serial }}</option>
+        </select>
+      </div>
+      <button class="btn btn--ghost" @click="refreshEnv()" title="重新检测设备">
+        <i class="layui-icon layui-icon-refresh"></i> 重新检测
+      </button>
+      <button class="btn btn--ghost btn--icon" @click="openSettings()" title="设置">
+        <i class="layui-icon layui-icon-set"></i>
+      </button>
+    </div>
+  </header>
+
+  <div class="demobar" v-show="env.demo">
+    <span class="demobar__tag">演示模式</span>
+    <span>{{ env.reason || '未检测到设备，当前显示演示数据' }}</span>
+    <button class="btn btn--sm btn--primary" @click="refreshEnv()">重新检测</button>
+  </div>
+
+  <main class="main">
+
+    <!-- ============================ 模块一：设备 ============================ -->
+    <section class="page" v-show="route==='devices'">
+      <aside class="side">
+        <div class="side__hd">已连接设备 <span class="count">{{ devices.list.length }}</span></div>
+        <div class="devlist">
+          <div class="devcard" v-for="d in devices.list" :key="d.serial"
+               :class="devices.current===d.serial?'is-active':''"
+               @click="devices.select(AdbApp, d.serial)">
+            <div class="devcard__ic" :style="{background:d.iconColor}">{{ d.iconText }}</div>
+            <div class="devcard__main">
+              <div class="devcard__name">{{ d.model }} <span class="muted sm" v-show="d.device">({{ d.device }})</span></div>
+              <div class="devcard__meta">{{ d.serial }}</div>
+              <div class="devcard__tags">
+                <span class="tag" :class="d.platform==='ios'?'tag--ios':'tag--plain'">{{ d.platformText }}</span>
+                <span class="tag" :class="d.stateCls">{{ d.stateText }}</span>
+                <span class="tag tag--plain">{{ d.transportText }}</span>
+              </div>
+            </div>
+            <button class="btn btn--sm btn--primary" @click="go('logs')">查看日志</button>
+          </div>
+          <div class="empty" v-show="!devices.list.length">
+            未检测到设备<br><span class="muted sm">请检查 USB 调试开关与数据线</span>
+          </div>
+        </div>
+        <button class="btn btn--dash" @click="devices.wifiModal=true">+ 添加更多 ADB 设备</button>
+      </aside>
+
+      <div class="content">
+        <div class="content__hd">
+          <h2>ADB 设备连接与检测</h2>
+          <span class="muted">实时检测 USB / 无线连接的 Android 设备</span>
+        </div>
+
+        <div class="grid grid--3">
+          <div class="card">
+            <div class="card__hd"><span class="card__title">ADB 环境</span>
+              <span class="tag" :class="devices.adbCls">{{ devices.adbStateText }}</span></div>
+            <div class="kv">
+              <div class="kv__row"><span>版本</span><b>{{ env.adbVersion || '—' }}</b></div>
+              <div class="kv__row"><span>安装路径</span><b class="path" :title="env.adbPath">{{ env.adbPath || '—' }}</b></div>
+              <div class="kv__row"><span>来源</span><b>{{ adbSourceText || '—' }}</b></div>
+              <div class="kv__row"><span>ADB 服务</span><b>{{ devices.adbStateText }} [{{ env.serverPort }}]</b></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card__hd"><span class="card__title">设备连接</span>
+              <span class="tag" :class="devices.stateCls">{{ devices.stateText }}</span></div>
+            <div class="kv">
+              <div class="kv__row"><span>USB 设备</span><b>{{ devices.usbCount }} 台</b></div>
+              <div class="kv__row"><span>无线设备</span><b>{{ devices.wifiCount }} 台</b></div>
+              <div class="kv__row"><span>iOS 支持</span>
+                <b :class="env.iosAvailable?'t-ok':'t-warn'">{{ env.iosAvailable ? ('已启用 ' + env.iosLibVersion) : (env.iosReason || '未启用') }}</b></div>
+              <div class="kv__row"><span>授权状态</span><b class="tag" :class="devices.authCls">{{ devices.authText }}</b></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card__hd"><span class="card__title">快捷操作</span></div>
+            <div class="btns">
+              <button class="btn" @click="devices.refresh(AdbApp)">重新检测设备</button>
+              <button class="btn" @click="devices.wifiModal=true">无线 ADB 连接</button>
+              <button class="btn btn--primary" @click="go('logs')">开始查看实时日志</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" v-if="devices.detail">
+          <div class="card__hd"><span class="card__title">当前设备详细信息</span>
+            <span class="tag ok">device</span></div>
+          <div class="detailgrid">
+            <div class="dfield" v-for="f in devices.detailFields" :class="f.wide?'is-wide':''">
+              <span class="dfield__label">{{ f.label }}</span>
+              <span class="dfield__value" :class="f.cls" :title="f.value">{{ f.value }}</span>
+            </div>
+          </div>
+          <div class="rowend">
+            <button class="btn btn--ghost btn--sm" @click="devices.copySerial(AdbApp)">复制序列号</button>
+          </div>
+        </div>
+        <div class="card" v-show="!devices.detail">
+          <div class="empty">暂无设备详情</div>
+        </div>
+
+        <div class="tipbar" :class="devices.tipCls">
+          <i class="layui-icon layui-icon-tips"></i>
+          <span class="tipbar__text">{{ devices.tipText }}</span>
+          <button class="btn btn--primary btn--sm" @click="go('logs')">进入日志查看</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ 模块二：日志 ============================ -->
+    <section class="page" v-show="route==='logs'">
+      <aside class="side">
+        <div class="side__hd">日志缓冲区</div>
+        <div class="buflist">
+          <div class="bufitem" v-for="b in logs.buffers" :key="b.key"
+               :class="logs.buffer===b.key?'is-active':''"
+               @click="logs.setBuffer(AdbApp, b.key)">
+            <span class="radio" :class="logs.buffer===b.key?'on':''"></span>
+            <span class="bufitem__name">{{ b.label }}</span>
+            <span class="muted sm">{{ b.desc }}</span>
+          </div>
+        </div>
+
+        <div class="side__hd">日志过滤</div>
+        <div class="card card--inner">
+          <div class="card__hd"><span class="card__title">按包名过滤</span></div>
+          <div class="pkgcard" v-show="logs.pkg.package">
+            <div class="pkgcard__ic">{{ logs.pkg.label.charAt(0) }}</div>
+            <div class="pkgcard__main">
+              <div class="pkgcard__name">{{ logs.pkg.label }}</div>
+              <div class="pkgcard__pkg">{{ logs.pkg.package }}</div>
+              <div class="pkgcard__state"><span class="tag ok">运行中</span><span class="muted sm"> PID {{ logs.pkg.pid }}</span></div>
+            </div>
+          </div>
+          <div class="empty sm" v-show="!logs.pkg.package">未选择应用</div>
+          <div class="btns btns--col">
+            <button class="btn btn--sm" @click="logs.openPkgModal(AdbApp)">选择应用包</button>
+            <button class="btn btn--sm" @click="logs.clearPkg(AdbApp)" v-show="logs.pkg.package">清除包名过滤</button>
+          </div>
+        </div>
+
+        <template v-if="isIos">
+          <div class="side__hd">Cocos JS 日志（USB）</div>
+          <div class="card card--inner">
+            <div class="inputrow">
+              <input type="text" v-model="settings.cocosInspector" placeholder="设备端口，如 6086">
+              <button class="btn btn--sm" @click="logs.detectJsPort(AdbApp)" :disabled="logs.detecting">探测</button>
+            </div>
+            <div class="btns">
+              <button class="btn btn--sm btn--primary" @click="logs.saveJsPort(AdbApp)">保存端口</button>
+              <button class="btn btn--sm btn--ghost" @click="logs.restart(AdbApp)" v-show="logs.running">重启生效</button>
+            </div>
+            <div class="sidenote">游戏需开启 JS 调试端口；捕获的 console.log 以 jswrapper 显示，纯 USB 转发免管理员</div>
+            <div class="empty sm" v-show="logs.cdpRunning" style="color:var(--ok,#238636)">{{ logs.cdpStatusText }}</div>
+            <div class="empty sm" v-show="logs.cdpErrorShown" style="color:#f85149">{{ logs.cdpErrorShown }}</div>
+          </div>
+        </template>
+
+        <div class="side__hd">操作日志联动</div>
+        <div class="card card--inner">
+          <div class="actionlog">
+            <div class="actionlog__row" v-for="a in actionLogs.slice(0,8)" :key="a.ts">
+              <span class="actionlog__time">{{ a.time }}</span>
+              <span class="actionlog__act">{{ a.action }}</span>
+            </div>
+            <div class="empty sm" v-show="!actionLogs.length">暂无操作记录</div>
+          </div>
+          <div class="btns"><button class="btn btn--sm btn--ghost" @click="loadActionLogs()">刷新</button></div>
+        </div>
+      </aside>
+
+      <div class="content">
+        <div class="toolbar">
+          <button class="btn" @click="logs.openPkgModal(AdbApp)">
+            <i class="layui-icon layui-icon-set-sm"></i>
+            {{ logs.pkg.package ? logs.pkg.package : '按包名过滤' }}
+          </button>
+          <div class="mdd" :class="{ 'is-open': logs.dd.level }" @click.stop>
+            <button class="sel mdd__btn" @click="logs.toggleDd('level')">{{ logs.levelLabel }}</button>
+            <div class="mdd__panel">
+              <label class="mdd__item mdd__item--all">
+                <input type="checkbox" :checked="logs.levels.length === 0" @change="logs.clearSel('levels')">
+                <span>全部级别</span>
+              </label>
+              <label class="mdd__item" v-for="lv in logs.levelOptions">
+                <input type="checkbox" :checked="logs.isChecked('levels', lv.k)" @change="logs.toggleIn('levels', lv.k)">
+                <span class="lvbadge" :class="'lv-' + lv.k.toLowerCase()">{{ lv.k }}</span>
+                <span>{{ lv.label }}</span>
+              </label>
+            </div>
+          </div>
+          <div class="mdd" :class="{ 'is-open': logs.dd.pid }" @click.stop>
+            <button class="sel mdd__btn" @click="logs.toggleDd('pid')">{{ logs.pidLabel }}</button>
+            <div class="mdd__panel mdd__panel--scroll">
+              <label class="mdd__item mdd__item--all">
+                <input type="checkbox" :checked="logs.pids.length === 0" @change="logs.clearSel('pids')">
+                <span>全部 PID</span>
+              </label>
+              <label class="mdd__item" v-for="p in logs.pidOptions">
+                <input type="checkbox" :checked="logs.isChecked('pids', p)" @change="logs.toggleIn('pids', p)">
+                <span>{{ p }}</span>
+              </label>
+            </div>
+          </div>
+          <div class="mdd" :class="{ 'is-open': logs.dd.tag }" @click.stop>
+            <button class="sel mdd__btn" @click="logs.toggleDd('tag')">{{ logs.tagLabel }}</button>
+            <div class="mdd__panel mdd__panel--scroll">
+              <label class="mdd__item mdd__item--all">
+                <input type="checkbox" :checked="logs.tags.length === 0" @change="logs.clearSel('tags')">
+                <span>全部标签</span>
+              </label>
+              <label class="mdd__item" v-for="t in logs.tagOptions">
+                <input type="checkbox" :checked="logs.isChecked('tags', t)" @change="logs.toggleIn('tags', t)">
+                <span class="mdd__tagtext">{{ t }}</span>
+              </label>
+            </div>
+          </div>
+          <div class="search">
+            <i class="layui-icon layui-icon-search"></i>
+            <input type="text" v-model="logs.keyword" placeholder="搜索关键字，多词用空格分隔…">
+            <select class="sel sel--mini" v-model="logs.mode">
+              <option value="include">包含</option>
+              <option value="exclude">不包含</option>
+              <option value="regex">正则</option>
+            </select>
+          </div>
+          <div class="spacer"></div>
+          <button class="btn" :class="logs.running?'':'btn--primary'" @click="logs.start(AdbApp)" v-show="!logs.running">开始捕获</button>
+          <button class="btn" @click="logs.togglePause(AdbApp)" v-show="logs.running">
+            <i class="layui-icon" :class="logs.paused?'layui-icon-play':'layui-icon-pause'"></i>
+            {{ logs.paused ? '继续' : '暂停' }}
+          </button>
+          <button class="btn" @click="logs.stop(AdbApp)" v-show="logs.running">停止</button>
+          <button class="btn btn--ghost" @click="logs.clearLogs(AdbApp)">清空</button>
+          <button class="btn btn--primary" @click="logs.openSave(AdbApp)">保存日志</button>
+        </div>
+
+        <div class="chiprow" v-show="logs.chips.length">
+          <span class="chip" v-for="c in logs.chips" :key="c.key">
+            <b>{{ c.label }}</b>{{ c.value }}
+            <i class="layui-icon layui-icon-close" @click="logs.removeChip(c.key)"></i>
+          </span>
+          <button class="linkbtn" @click="logs.clearAllFilters()">清除全部</button>
+        </div>
+        <div class="chiprow chiprow--empty" v-show="!logs.chips.length">
+          <span class="muted sm">未设置过滤条件，显示全部日志</span>
+        </div>
+
+        <div class="content__hd content__hd--tight">
+          <h3 class="counttext">{{ logs.countText }}</h3>
+          <label class="switch">
+            <input type="checkbox" v-model="logs.autoscroll" @change="logs.onAutoscrollChange()"> 自动滚动
+          </label>
+          <span class="muted sm" v-show="logs.frozenRows">视图已冻结，勾选自动滚动恢复</span>
+        </div>
+
+        <div class="logtable" id="logTableWrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="c-time">时间</th>
+                <th class="c-lv">级别</th>
+                <th class="c-pid">PID</th>
+                <th class="c-tag">标签</th>
+                <th>消息内容</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="l in logs.displayed" :key="l.id" :class="l.rowCls" @click="logs.selectLine(AdbApp, l.id)">
+                <td class="c-time">{{ l.time }}</td>
+                <td><span class="lvbadge" :class="l.levelCls">{{ l.level }}</span></td>
+                <td class="c-pid">{{ l.pid }}</td>
+                <td class="c-tag">{{ l.tag }}</td>
+                <td class="c-msg" v-html="l.msgHtml"></td>
+              </tr>
+              <tr class="row-empty" v-show="!logs.displayed.length">
+                <td colspan="5" class="empty">暂无匹配的日志{{ logs.running ? '' : '（未开始捕获）' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="statusbar">
+          <span><i class="layui-icon layui-icon-ok" v-show="logs.running"></i> {{ logs.running ? '已连接' : '未连接' }} · USB</span>
+          <span v-show="logs.pkg.package">包名：{{ logs.pkg.package }}</span>
+          <span :class="logs.stateCls==='ok'?'t-ok':(logs.stateCls==='warn'?'t-warn':'t-bad')">
+            {{ logs.stateText }} · {{ logs.total }} 条
+          </span>
+        </div>
+
+        <!-- 日志详情面板 -->
+        <div class="detailpanel" v-if="logs.detailOpen">
+          <div class="detailpanel__hd">
+            <span>日志详情</span>
+            <i class="layui-icon layui-icon-close" @click="logs.closeDetail()"></i>
+          </div>
+          <div class="detailgrid detailgrid--2" v-show="logs.selected">
+            <div class="dfield" v-for="f in logs.selectedFields">
+              <span class="dfield__label">{{ f.label }}</span>
+              <span class="dfield__value" :class="f.cls">{{ f.value }}</span>
+            </div>
+          </div>
+          <div class="pre" v-show="logs.selected">{{ logs.fullText() }}</div>
+          <div class="btns">
+            <button class="btn btn--sm" @click="logs.copyLine(AdbApp)">复制日志</button>
+            <button class="btn btn--sm" @click="logs.filterByPid(AdbApp, logs.selected.pid)" v-show="logs.selected">只看该进程日志</button>
+            <button class="btn btn--sm" @click="logs.filterByTag(AdbApp, logs.selected.tag)" v-show="logs.selected && logs.selected.tag">按 Tag 过滤</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ 模块三：应用 ============================ -->
+    <section class="page" v-show="route==='apps'">
+      <aside class="side">
+        <div class="side__hd">包名类型</div>
+        <div class="typelist">
+          <div class="typeitem" v-for="t in apps.typeItems" :key="t.key"
+               :class="apps.typeFilter===t.key?'is-active':''" @click="apps.setType(t.key)">
+            <span>{{ t.label }}</span>
+            <span class="count">{{ t.count }}</span>
+          </div>
+        </div>
+        <div class="side__hd">应用存储占用</div>
+        <div class="card card--inner">
+          <div class="kv">
+            <div class="kv__row"><span>应用总占</span><b>{{ apps.totalSizeText }}</b></div>
+            <div class="kv__row"><span>运行中</span><b>{{ apps.runningCount }} 个</b></div>
+            <div class="kv__row"><span>已加载</span><b>{{ apps.packages.length }} 个</b></div>
+          </div>
+          <div class="bars">
+            <div class="bar" v-for="b in apps.topApps">
+              <div class="bar__hd"><span>{{ b.name }}</span><span class="muted sm">{{ b.text }}</span></div>
+              <div class="bar__track"><div class="bar__fill" :style="{width:b.width+'%'}"></div></div>
+            </div>
+            <div class="empty sm" v-show="!apps.topApps.length">暂无大小数据</div>
+          </div>
+        </div>
+      </aside>
+
+      <div class="content">
+        <div class="content__hd">
+          <h2>已安装应用包</h2>
+          <span class="muted">共检索到 {{ apps.packages.length }} 个应用 · 已同步自设备 {{ devices.detail ? devices.detail.model : '' }}</span>
+          <div class="spacer"></div>
+          <button class="btn" @click="apps.reload(AdbApp)">同步包列表</button>
+          <button class="btn btn--primary" @click="apps.openInstall(AdbApp)">安装 APK</button>
+        </div>
+
+        <div class="toolbar">
+          <div class="search search--wide">
+            <i class="layui-icon layui-icon-search"></i>
+            <input type="text" v-model="apps.keyword" @input="apps.scheduleLabels(AdbApp)" placeholder="搜索应用名或包名…">
+          </div>
+          <select class="sel" v-model="apps.sortBy">
+            <option value="name">按名称排序</option>
+            <option value="size">按大小排序</option>
+            <option value="package">按包名排序</option>
+          </select>
+          <label class="switch"><input type="checkbox" v-model="apps.onlyRunning"> 仅显示运行中</label>
+          <span class="muted sm hint-inline" v-show="apps.labelHint">{{ apps.labelHint }}</span>
+          <div class="spacer"></div>
+          <span class="muted sm">{{ apps.rangeText }}</span>
+        </div>
+
+        <div class="tablewrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th style="width:34px"></th><th>应用</th><th>包名</th><th style="width:110px">版本</th>
+                <th style="width:88px">类型</th><th style="width:96px">大小</th>
+                <th style="width:96px">状态</th><th style="width:170px">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="a in apps.paged" :key="a.packageName">
+                <td><input type="checkbox" :checked="a.selected" @change="apps.toggleSelect(a.packageName)"></td>
+                <td>
+                  <div class="appcell">
+                    <span class="appic" :style="{background:a.iconColor}">{{ a.iconText }}</span>
+                    <span class="appcell__name">{{ a.displayName }}</span>
+                  </div>
+                </td>
+                <td class="mono">{{ a.packageName }}</td>
+                <td>{{ a.versionName || '—' }}</td>
+                <td><span class="tag" :class="a.typeCls">{{ a.typeLabel }}</span></td>
+                <td>{{ a.sizeText }}</td>
+                <td><span :class="a.statusCls==='run'?'t-ok':'muted'">{{ a.statusText }}</span></td>
+                <td class="ops">
+                  <button class="btn btn--sm btn--danger" @click="apps.confirmUninstall(a.packageName)">卸载</button>
+                  <button class="btn btn--sm" @click="apps.openDetail(AdbApp, a.packageName)">详情</button>
+                </td>
+              </tr>
+              <tr class="row-empty" v-show="!apps.paged.length">
+                <td colspan="8" class="empty">{{ apps.loading ? '加载中…' : '暂无应用数据' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pager">
+          <span class="muted sm">{{ apps.rangeText }}</span>
+          <div class="pager__nums">
+            <button class="pbtn" :class="apps.page===1?'is-dis':''" @click="apps.gotoPage(apps.page-1)">上一页</button>
+            <button class="pbtn" v-for="p in apps.pageNumbers" :class="apps.page===p?'is-cur':''" @click="apps.gotoPage(p)">{{ p }}</button>
+            <button class="pbtn" :class="apps.page===apps.totalPages?'is-dis':''" @click="apps.gotoPage(apps.page+1)">下一页</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ 模块四：文件 ============================ -->
+    <section class="page" v-show="route==='files'">
+      <aside class="side">
+        <div class="side__hd">存储位置</div>
+        <div class="typelist">
+          <div class="typeitem" v-for="r in files.roots" :key="r.path"
+               :class="files.isCurrent(r.path)?'is-active':''" @click="files.openDir(AdbApp, r.path)">
+            <span>{{ r.label }}</span>
+            <i class="layui-icon layui-icon-password" v-show="r.locked"></i>
+          </div>
+        </div>
+
+        <div class="side__hd">设备存储容量</div>
+        <div class="card card--inner">
+          <div class="ring">
+            <div class="ring__num">{{ files.storageText }}</div>
+            <div class="ring__track"><div class="ring__fill" :style="{width:files.usedPercent+'%'}"></div></div>
+            <div class="muted sm">已用空间</div>
+          </div>
+          <div class="bars">
+            <div class="bar" v-for="c in files.storage.categories">
+              <div class="bar__hd"><span>{{ c.label }}</span><span class="muted sm">{{ c.text }}</span></div>
+              <div class="bar__track"><div class="bar__fill" :class="'bg-'+c.cls" :style="{width:c.width+'%'}"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="side__hd">快捷目录</div>
+        <div class="typelist">
+          <div class="typeitem typeitem--sm" v-for="q in files.quickDirs" :key="q" @click="files.openDir(AdbApp, q)">
+            <span>{{ q }}</span>
+          </div>
+        </div>
+        <div class="sidenote" v-show="files.iosTip">{{ files.iosTip }}</div>
+
+        <template v-if="files.isIos">
+          <div class="side__hd">应用沙盒（容器）</div>
+          <div class="card card--inner">
+            <template v-if="!files.inApp">
+              <select class="sel sel--full" v-model="files.appBundle">
+                <option value="">选择应用…</option>
+                <option v-for="a in files.appList" :key="a.packageName" :value="a.packageName">{{ a.label || a.packageName }}</option>
+              </select>
+              <button class="btn btn--sm btn--primary" style="margin-top:8px"
+                      :disabled="!files.appBundle" @click="files.enterApp(AdbApp, files.appBundle)">浏览沙盒</button>
+              <div class="muted sm" v-if="files.appLoadError" style="margin-top:6px">{{ files.appLoadError }}</div>
+              <div class="muted sm" v-else style="margin-top:6px">仅「文件共享」类应用可浏览（非越狱限制）</div>
+            </template>
+            <template v-else>
+              <div class="muted sm">当前容器：{{ files.appLabel }}</div>
+              <button class="btn btn--sm btn--ghost" style="margin-top:8px" @click="files.exitApp(AdbApp)">退出应用沙盒</button>
+            </template>
+          </div>
+        </template>
+      </aside>
+
+      <div class="content">
+        <div class="crumbs">
+          <button class="btn btn--sm btn--ghost" @click="files.up(AdbApp)">↑ 上级</button>
+          <div class="pathbar">
+            <input type="text" v-model="files.pathInput" spellcheck="false"
+                   placeholder="输入路径，如 /data/data/<包名>/files（Enter 或点转到）"
+                   @keyup.enter="files.goToPath(AdbApp)">
+            <button class="btn btn--sm" @click="files.goToPath(AdbApp)">转到</button>
+          </div>
+        </div>
+        <div class="crumbs crumbs--sub" v-show="files.breadcrumbs.length > 1">
+          <span class="crumb" v-for="c in files.breadcrumbs" @click="files.openDir(AdbApp, c.path)">{{ c.label }}</span>
+        </div>
+
+        <div class="toolbar">
+          <div class="search">
+            <i class="layui-icon layui-icon-search"></i>
+            <input type="text" v-model="files.search" placeholder="搜索当前目录…">
+          </div>
+          <select class="sel" v-model="files.sortBy">
+            <option value="name">按名称排序</option>
+            <option value="size">按大小排序</option>
+          </select>
+          <div class="viewswitch">
+            <button class="vbtn" :class="files.view==='list'?'is-cur':''" @click="files.view='list'">列表</button>
+            <button class="vbtn" :class="files.view==='grid'?'is-cur':''" @click="files.view='grid'">网格</button>
+          </div>
+          <button class="btn btn--ghost" @click="files.reload(AdbApp)"><i class="layui-icon layui-icon-refresh"></i></button>
+          <button class="btn" @click="files.openMkdir()">新建文件夹</button>
+          <button class="btn btn--primary" @click="files.openUpload(AdbApp)">上传文件</button>
+        </div>
+
+        <div class="tablewrap" v-show="files.view==='list'">
+          <table class="table">
+            <thead>
+              <tr>
+                <th style="width:34px"><input type="checkbox" :checked="files.allSelected" @change="files.toggleAll()"></th>
+                <th>名称</th><th style="width:110px">大小</th><th style="width:100px">类型</th>
+                <th style="width:150px">修改时间</th><th style="width:190px">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="e in files.filteredEntries" :key="e.path" :class="e.selected?'is-sel':''">
+                <td><input type="checkbox" :checked="e.selected" @change="files.toggle(e)"></td>
+                <td>
+                  <div class="filecell" @click="files.enter(AdbApp, e)">
+                    <span class="fico" :class="e.typeCls" v-html="e.iconSvg"></span>
+                    <span class="filecell__name" :class="e.isDir?'is-dir':''">{{ e.name }}</span>
+                  </div>
+                </td>
+                <td>{{ e.sizeText }}</td>
+                <td><span class="tag tag--plain">{{ e.typeLabel }}</span></td>
+                <td class="muted">{{ e.mtime }}</td>
+                <td class="ops">
+                  <button class="btn btn--sm" @click="files.download(AdbApp, [e.path])">下载</button>
+                  <button class="btn btn--sm" @click="files.openRename(e)">重命名</button>
+                  <button class="btn btn--sm btn--danger" @click="files.openDelete(AdbApp, [e.path])">删除</button>
+                </td>
+              </tr>
+              <tr class="row-empty" v-show="!files.filteredEntries.length">
+                <td colspan="6" class="empty">{{ files.loading ? '加载中…' : (files.loadError || '空目录') }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="filegrid" v-show="files.view==='grid'">
+          <div class="fcard" v-for="e in files.filteredEntries" :key="e.path"
+               :class="e.selected?'is-sel':''" @click="files.toggle(e)" @dblclick="files.enter(AdbApp, e)">
+            <span class="fico fico--lg" :class="e.typeCls" v-html="e.iconSvg"></span>
+            <div class="fcard__name">{{ e.name }}</div>
+            <div class="muted sm">{{ e.sizeText }}</div>
+          </div>
+          <div class="empty" v-show="!files.filteredEntries.length">{{ files.loading ? '加载中…' : (files.loadError || '空目录') }}</div>
+        </div>
+
+        <div class="filebar">
+          <span>已选 {{ files.selectedCount }} 个文件<span v-show="files.selectedCount">（{{ files.selectedSizeText }}）</span></span>
+          <span class="muted">| 共 {{ files.entries.length }} 项 · {{ files.dirSizeText }}</span>
+          <div class="spacer"></div>
+          <button class="btn btn--sm" @click="files.download(AdbApp, files.selectedEntries.map(function(x){return x.path}))">批量下载</button>
+          <button class="btn btn--sm" @click="files.openMove(AdbApp)">移动</button>
+          <button class="btn btn--sm btn--danger" @click="files.openDelete(AdbApp, files.selectedEntries.map(function(x){return x.path}))">批量删除</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============================== 弹窗 ============================== -->
+  <div class="mask" v-show="devices.wifiModal" @click="devices.wifiModal=false"></div>
+  <div class="modal" v-show="devices.wifiModal">
+    <div class="modal__hd">无线 ADB 连接 <i class="layui-icon layui-icon-close" @click="devices.wifiModal=false"></i></div>
+    <div class="modal__bd">
+      <div class="field">
+        <label>设备地址</label>
+        <input type="text" v-model="devices.wifiAddr" placeholder="192.168.1.20:5555">
+      </div>
+      <div class="hint">先通过 USB 连接执行 <code>adb tcpip 5555</code>，再输入设备 IP 连接。</div>
+    </div>
+    <div class="modal__ft">
+      <button class="btn" @click="devices.wifiModal=false">取消</button>
+      <button class="btn btn--primary" @click="devices.connectWireless(AdbApp)">连接</button>
+    </div>
+  </div>
+
+  <!-- 包名过滤 -->
+  <div class="mask" v-show="logs.pkgModal" @click="logs.pkgModal=false"></div>
+  <div class="modal modal--lg" v-show="logs.pkgModal">
+    <div class="modal__hd">按应用包过滤日志 <i class="layui-icon layui-icon-close" @click="logs.pkgModal=false"></i></div>
+    <div class="modal__bd">
+      <div class="search search--wide">
+        <i class="layui-icon layui-icon-search"></i>
+        <input type="text" v-model="logs.appSearch" placeholder="搜索应用名或包名…">
+      </div>
+      <div class="tabs">
+        <button class="tabbtn" :class="logs.appTab==='running'?'is-cur':''" @click="logs.appTab='running'">运行中的应用</button>
+        <button class="tabbtn" :class="logs.appTab==='all'?'is-cur':''" @click="logs.appTab='all'">全部已安装应用</button>
+      </div>
+      <div class="applist">
+        <div class="approw" v-for="a in logs.filteredApps" :key="a.packageName + a.pid"
+             :class="logs.appSel===a.packageName?'is-cur':''" @click="logs.pickApp(a.packageName)">
+          <span class="appic" :style="{background:a.iconColor}">{{ a.iconText }}</span>
+          <div class="approw__main">
+            <div class="approw__name">{{ a.displayName }}</div>
+            <div class="approw__pkg">{{ a.packageName }}<span v-show="a.pid"> · PID {{ a.pid }}</span></div>
+          </div>
+          <span class="radio" :class="logs.appSel===a.packageName?'on':''"></span>
+        </div>
+        <div class="empty" v-show="!logs.filteredApps.length">{{ logs.appsLoading ? '加载中…' : '无匹配应用' }}</div>
+      </div>
+    </div>
+    <div class="modal__ft">
+      <span class="muted sm">已选择：{{ logs.appSel || '无' }}</span>
+      <div class="spacer"></div>
+      <button class="btn" @click="logs.pkgModal=false">取消</button>
+      <button class="btn" @click="logs.applyPkg(AdbApp)">应用过滤</button>
+    </div>
+  </div>
+
+  <!-- 保存日志 -->
+  <div class="mask" v-show="logs.saveModal" @click="logs.saveModal=false"></div>
+  <div class="modal" v-show="logs.saveModal">
+    <div class="modal__hd">保存日志 <i class="layui-icon layui-icon-close" @click="logs.saveModal=false"></i></div>
+    <div class="modal__bd">
+      <div class="field">
+        <label>保存范围</label>
+        <label class="radiolabel"><input type="radio" value="filtered" v-model="logs.save.scope"> 当前过滤结果（{{ logs.filteredTotal }} 条）</label>
+        <label class="radiolabel"><input type="radio" value="all" v-model="logs.save.scope"> 全部日志（{{ logs.total }} 条）</label>
+      </div>
+      <div class="field">
+        <label>文件格式</label>
+        <div class="segbtns">
+          <button class="segbtn" :class="logs.save.format==='txt'?'is-cur':''" @click="logs.save.format='txt'">.txt 文本</button>
+          <button class="segbtn" :class="logs.save.format==='csv'?'is-cur':''" @click="logs.save.format='csv'">.csv 表格</button>
+          <button class="segbtn" :class="logs.save.format==='log'?'is-cur':''" @click="logs.save.format='log'">.log 原始</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>保存位置</label>
+        <div class="pathrow">
+          <input type="text" v-model="logs.save.path" placeholder="选择保存路径…">
+          <button class="btn btn--sm" @click="logs.pickSavePath()">浏览</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>选项</label>
+        <label class="checklabel"><input type="checkbox" v-model="logs.save.withTs"> 包含时间戳</label>
+        <label class="checklabel"><input type="checkbox" v-model="logs.save.withIds"> 包含进程与线程 ID</label>
+        <label class="checklabel"><input type="checkbox" v-model="logs.save.zip"> 保存后自动压缩为 .zip</label>
+      </div>
+      <div class="hint">将保存 {{ logs.saveCountText }} 条日志。</div>
+    </div>
+    <div class="modal__ft">
+      <button class="btn" @click="logs.saveModal=false">取消</button>
+      <button class="btn btn--primary" @click="logs.doSave(AdbApp)">保存文件</button>
+    </div>
+  </div>
+
+  <!-- 应用详情 -->
+  <div class="mask" v-show="apps.detailOpen" @click="apps.closeDetail()"></div>
+  <div class="modal modal--lg" v-show="apps.detailOpen">
+    <div class="modal__hd">应用详情 <i class="layui-icon layui-icon-close" @click="apps.closeDetail()"></i></div>
+    <div class="modal__bd" v-if="apps.detail">
+      <div class="apphead">
+        <span class="appic appic--lg" :style="{background:apps.detail.iconColor?apps.detail.iconColor:'#1f6feb'}">{{ apps.detail.label ? apps.detail.label.charAt(0) : '?' }}</span>
+        <div>
+          <div class="apphead__name">{{ apps.detail.label || apps.detail.packageName }}</div>
+          <div class="muted sm">{{ apps.detail.packageName }} · 版本 {{ apps.detail.versionName }}</div>
+        </div>
+        <div class="spacer"></div>
+        <span class="tag" :class="apps.detail.running?'ok':'tag--plain'">{{ apps.detail.running ? '运行中' : '未运行' }}</span>
+      </div>
+      <div class="detailgrid detailgrid--3">
+        <div class="dfield" v-for="f in apps.detailFields">
+          <span class="dfield__label">{{ f.label }}</span>
+          <span class="dfield__value">{{ f.value }}</span>
+        </div>
+      </div>
+      <div class="sect">存储占用</div>
+      <div class="grid grid--3">
+        <div class="statcard" v-for="s in apps.detailStorages">
+          <div class="statcard__label">{{ s.label }}</div>
+          <div class="statcard__value">{{ s.text }}</div>
+          <div class="muted sm">{{ s.desc }}</div>
+        </div>
+      </div>
+      <div class="sect">应用操作</div>
+      <div class="btns" v-show="!isIos">
+        <button class="btn" @click="apps.appAction(AdbApp, 'start')">启动</button>
+        <button class="btn" @click="apps.appAction(AdbApp, 'stop')">强制停止</button>
+        <button class="btn" @click="apps.appAction(AdbApp, 'clear')">清除数据</button>
+        <button class="btn" @click="apps.appAction(AdbApp, 'disable')">停用</button>
+      </div>
+      <div class="muted sm" v-show="isIos">
+        iOS 非越狱设备不提供启动 / 强制停止 / 清除数据等能力（只能用下面的卸载）。
+      </div>
+      <div class="sect">运行时权限
+        <span class="muted sm" v-show="!apps.permsUnsupported">已授予 {{ apps.detail.granted }}/{{ apps.detail.requested }} 项</span>
+        <span class="muted sm" v-show="apps.dangerPermCount"> · <b class="t-danger">危险 {{ apps.dangerPermCount }}</b> 项</span>
+      </div>
+      <div class="warnbox" v-show="apps.permsUnsupported">
+        iOS 非越狱设备不提供权限列表（需挂载开发者镜像解析 entitlements），此处无法展示。
+      </div>
+      <div class="permgrid" v-show="!apps.permsUnsupported">
+        <div class="perm" v-for="p in apps.detailPerms" :key="p.raw"
+             :class="{'perm--danger': p.group === 'dangerous'}" :title="p.tip">
+          <span>{{ p.name }}</span>
+          <span class="tag" :class="p.cls==='ok'?'ok':'tag--plain'">{{ p.state }}</span>
+        </div>
+        <div class="empty sm" v-show="!apps.detailPerms.length">无权限信息</div>
+      </div>
+    </div>
+    <div class="modal__bd" v-show="!apps.detail">
+      <div class="empty">{{ apps.detailLoading ? '加载中…' : '无详情数据' }}</div>
+    </div>
+    <div class="modal__ft">
+      <span class="muted sm">操作过程将联动捕获日志</span>
+      <div class="spacer"></div>
+      <button class="btn" @click="apps.closeDetail()">取消</button>
+      <button class="btn btn--danger" @click="apps.confirmUninstall(apps.detail.packageName)" v-show="apps.detail">卸载应用</button>
+    </div>
+  </div>
+
+  <!-- 卸载确认 -->
+  <div class="mask" v-show="apps.uninstallOpen" @click="apps.uninstallOpen=false"></div>
+  <div class="modal" v-show="apps.uninstallOpen">
+    <div class="modal__hd modal__hd--danger">卸载应用 <i class="layui-icon layui-icon-close" @click="apps.uninstallOpen=false"></i></div>
+    <div class="modal__bd">
+      <div class="warnbox">
+        确认卸载 <b class="mono">{{ apps.uninstallTarget }}</b> ？<br>
+        该操作不可恢复，应用数据与缓存将被清除。
+      </div>
+      <label class="checklabel"><input type="checkbox" v-model="apps.uninstallKeep"> 保留数据与缓存目录（-k）</label>
+      <div class="taskbox" v-if="apps.uninstallTask">
+        <div class="prog"><div class="prog__fill" :style="{width:(apps.uninstallTask.percent||0)+'%'}"></div></div>
+        <div class="muted sm">{{ apps.uninstallTask.phase }} {{ apps.uninstallTask.percent }}%</div>
+      </div>
+    </div>
+    <div class="modal__ft">
+      <button class="btn" @click="apps.uninstallOpen=false">取消</button>
+      <button class="btn btn--danger" @click="apps.doUninstall(AdbApp)" v-show="!apps.uninstallTask || apps.uninstallTask.status!=='running'">确认卸载</button>
+    </div>
+  </div>
+
+  <!-- 安装 APK -->
+  <div class="mask" v-show="apps.installOpen" @click="apps.installOpen=false"></div>
+  <div class="modal" v-show="apps.installOpen">
+    <div class="modal__hd">{{ apps.installTitle }} <i class="layui-icon layui-icon-close" @click="apps.installOpen=false"></i></div>
+    <div class="modal__bd">
+      <div class="field">
+        <label>目标设备</label>
+        <div class="fakeinput">{{ apps.targetText }}</div>
+      </div>
+      <div class="dropzone" @click="apps.pickApk(AdbApp)">
+        <i class="layui-icon layui-icon-upload"></i>
+        <div>{{ apps.installDropText }}</div>
+        <div class="muted sm">{{ apps.installAccept }}</div>
+        <button class="btn btn--sm">浏览选择文件</button>
+      </div>
+      <div class="field" v-show="apps.installFile">
+        <label>已选择</label>
+        <div class="fakeinput mono filepicked">
+          <i class="layui-icon layui-icon-file-b filepicked__icon" title="点击移除该文件" @click="apps.clearInstallFile()"></i>
+          <span class="filepicked__name" :title="apps.installFile">{{ apps.installFile }}</span>
+          <i class="layui-icon layui-icon-close filepicked__clear" title="移除" @click="apps.clearInstallFile()"></i>
+        </div>
+      </div>
+      <div class="field" v-show="!apps.isIos">
+        <label>安装选项</label>
+        <label class="checklabel"><input type="checkbox" v-model="apps.installOpts.r"> -r 覆盖安装</label>
+        <label class="checklabel"><input type="checkbox" v-model="apps.installOpts.d"> -d 允许降级</label>
+        <label class="checklabel"><input type="checkbox" v-model="apps.installOpts.g"> -g 授予全部权限</label>
+        <label class="checklabel"><input type="checkbox" v-model="apps.installOpts.t"> -t 允许测试包</label>
+      </div>
+      <div class="taskbox" v-if="apps.installTask">
+        <div class="prog"><div class="prog__fill" :style="{width:(apps.installTask.percent||0)+'%'}"></div></div>
+        <div class="taskline">
+          <span>{{ apps.installTask.percent }}% · {{ apps.installTask.phase }}</span>
+          <span class="muted sm">{{ apps.installTask.speed }}</span>
+        </div>
+        <div class="tasklog"><div v-for="l in apps.installTask.logs">{{ l }}</div></div>
+      </div>
+    </div>
+    <div class="modal__ft">
+      <span class="muted sm">实时捕获安装日志</span>
+      <div class="spacer"></div>
+      <button class="btn" @click="apps.installOpen=false">取消</button>
+      <button class="btn" @click="apps.cancelInstall(AdbApp)" v-show="apps.installTask && apps.installTask.status==='running'">取消安装</button>
+      <button class="btn btn--primary" @click="apps.doInstall(AdbApp)" v-show="!apps.installTask || apps.installTask.status!=='running'">开始安装</button>
+    </div>
+  </div>
+
+  <!-- 上传文件 -->
+  <div class="mask" v-show="files.uploadOpen" @click="files.uploadOpen=false"></div>
+  <div class="modal" v-show="files.uploadOpen">
+    <div class="modal__hd">上传文件到设备 <i class="layui-icon layui-icon-close" @click="files.uploadOpen=false"></i></div>
+    <div class="modal__bd">
+      <div class="dropzone" @click="files.pickLocalFiles(AdbApp)">
+        <i class="layui-icon layui-icon-upload-drag"></i>
+        <div>拖放文件或文件夹到此处</div>
+        <button class="btn btn--sm">浏览选择</button>
+      </div>
+      <div class="field" v-show="files.uploadFiles.length">
+        <label>待上传文件（{{ files.uploadFiles.length }} 个 · {{ files.uploadTotalText }}）</label>
+        <div class="filelist">
+          <div class="filerow" v-for="(f,i) in files.uploadFiles">
+            <span class="filerow__name">{{ f.name }}</span>
+            <span class="muted sm">{{ f.sizeText }}</span>
+            <i class="layui-icon layui-icon-close" @click="files.removeUploadFile(i)"></i>
+          </div>
+        </div>
+      </div>
+      <div class="field">
+        <label>上传目标目录</label>
+        <div class="pathrow">
+          <input type="text" v-model="files.uploadTarget">
+          <button class="btn btn--sm" @click="files.uploadTarget=files.currentPath">当前目录</button>
+        </div>
+      </div>
+      <label class="checklabel"><input type="checkbox" v-model="files.uploadOverwrite"> 覆盖同名文件</label>
+      <label class="checklabel"><input type="checkbox" v-model="files.uploadLog"> 上传完成后联动记录 adb 日志</label>
+      <div class="taskbox" v-if="files.uploadTask">
+        <div class="prog"><div class="prog__fill" :style="{width:(files.uploadTask.percent||0)+'%'}"></div></div>
+        <div class="taskline">
+          <span>{{ files.uploadTask.percent }}% · {{ files.uploadTask.phase }}</span>
+          <span class="muted sm">{{ files.uploadTask.speed }}</span>
+        </div>
+        <div class="tasklog"><div v-for="l in files.uploadTask.logs">{{ l }}</div></div>
+      </div>
+    </div>
+    <div class="modal__ft">
+      <button class="btn" @click="files.uploadOpen=false">取消</button>
+      <button class="btn" @click="files.cancelUpload(AdbApp)" v-show="files.uploadTask && files.uploadTask.status==='running'">取消上传</button>
+      <button class="btn btn--primary" @click="files.doUpload(AdbApp)" v-show="!files.uploadTask || files.uploadTask.status!=='running'">开始上传</button>
+    </div>
+  </div>
+
+  <!-- 删除 / 安全擦除 -->
+  <div class="mask" v-show="files.deleteOpen" @click="files.deleteOpen=false"></div>
+  <div class="modal" v-show="files.deleteOpen">
+    <div class="modal__hd modal__hd--danger">删除 / 擦除数据 <i class="layui-icon layui-icon-close" @click="files.deleteOpen=false"></i></div>
+    <div class="modal__bd">
+      <div class="filebox">
+        <div class="filebox__name">{{ files.deleteTargets[0] ? files.deleteTargets[0].split('/').pop() : '' }}</div>
+        <div class="muted sm mono">{{ files.deleteTargets[0] }}</div>
+        <div class="muted sm" v-show="files.deleteTargets.length>1">共 {{ files.deleteTargets.length }} 项</div>
+      </div>
+      <div class="field">
+        <label>操作方式</label>
+        <label class="optradio" :class="!files.deleteSecure?'is-cur':''">
+          <input type="radio" value="normal" :checked="!files.deleteSecure" @change="files.deleteSecure=false">
+          <div>
+            <div class="optradio__title">常规删除 (rm)</div>
+            <div class="muted sm">从设备文件系统中移除文件</div>
+          </div>
+        </label>
+        <label class="optradio" :class="files.deleteSecure?'is-cur':''">
+          <input type="radio" value="secure" :checked="files.deleteSecure" @change="files.deleteSecure=true">
+          <div>
+            <div class="optradio__title optradio__title--danger">安全擦除（不可恢复）</div>
+            <div class="muted sm">用随机数据覆写后再删除，防止数据恢复</div>
+          </div>
+        </label>
+      </div>
+      <div class="field">
+        <label class="danger">危险操作确认：请输入 DELETE 以确认执行删除操作</label>
+        <input type="text" v-model="files.deleteConfirm" placeholder="DELETE">
+      </div>
+      <label class="checklabel"><input type="checkbox" v-model="files.deleteLog"> 操作完成后联动记录日志</label>
+      <div class="cmdbox mono">{{ files.deleteCommand }}</div>
+      <div class="taskbox" v-if="files.deleteTask">
+        <div class="prog"><div class="prog__fill" :style="{width:(files.deleteTask.percent||0)+'%'}"></div></div>
+        <div class="taskline"><span>{{ files.deleteTask.percent }}% · {{ files.deleteTask.phase }}</span></div>
+      </div>
+    </div>
+    <div class="modal__ft">
+      <button class="btn" @click="files.deleteOpen=false">取消</button>
+      <button class="btn btn--danger" :class="files.canDelete?'':'is-dis'" @click="files.doDelete(AdbApp)">确认删除</button>
+    </div>
+  </div>
+
+  <!-- 重命名 -->
+  <div class="mask" v-show="files.renameOpen" @click="files.renameOpen=false"></div>
+  <div class="modal modal--sm" v-show="files.renameOpen">
+    <div class="modal__hd">重命名 <i class="layui-icon layui-icon-close" @click="files.renameOpen=false"></i></div>
+    <div class="modal__bd">
+      <div class="field"><label>新名称</label><input type="text" v-model="files.renameValue"></div>
+    </div>
+    <div class="modal__ft">
+      <button class="btn" @click="files.renameOpen=false">取消</button>
+      <button class="btn btn--primary" @click="files.doRename(AdbApp)">确定</button>
+    </div>
+  </div>
+
+  <!-- 移动 -->
+  <div class="mask" v-show="files.moveOpen" @click="files.moveOpen=false"></div>
+  <div class="modal modal--sm" v-show="files.moveOpen">
+    <div class="modal__hd">移动到 <i class="layui-icon layui-icon-close" @click="files.moveOpen=false"></i></div>
+    <div class="modal__bd">
+      <div class="field">
+        <label>目标目录（{{ files.movePaths.length }} 项）</label>
+        <input type="text" v-model="files.moveTarget">
+      </div>
+    </div>
+    <div class="modal__ft">
+      <button class="btn" @click="files.moveOpen=false">取消</button>
+      <button class="btn btn--primary" @click="files.doMove(AdbApp)">确定</button>
+    </div>
+  </div>
+
+  <!-- 新建文件夹 -->
+  <div class="mask" v-show="files.mkdirOpen" @click="files.mkdirOpen=false"></div>
+  <div class="modal modal--sm" v-show="files.mkdirOpen">
+    <div class="modal__hd">新建文件夹 <i class="layui-icon layui-icon-close" @click="files.mkdirOpen=false"></i></div>
+    <div class="modal__bd">
+      <div class="field"><label>文件夹名称</label><input type="text" v-model="files.mkdirValue"></div>
+    </div>
+    <div class="modal__ft">
+      <button class="btn" @click="files.mkdirOpen=false">取消</button>
+      <button class="btn btn--primary" @click="files.doMkdir(AdbApp)">确定</button>
+    </div>
+  </div>
+
+  <!-- 设置 -->
+  <div class="mask" v-show="settings.open" @click="settings.open=false"></div>
+  <div class="modal" v-show="settings.open">
+    <div class="modal__hd">设置 <i class="layui-icon layui-icon-close" @click="settings.open=false"></i></div>
+    <div class="modal__bd">
+      <div class="field">
+        <label>adb 可执行文件路径（留空则自动探测）</label>
+        <div class="pathrow">
+          <input type="text" v-model="settings.adbPath" placeholder="C://platform-tools//adb.exe">
+          <button class="btn btn--sm" @click="settings.adbPath=settings.detected">用探测结果</button>
+        </div>
+        <div class="hint">自动探测结果：<span class="mono">{{ settings.detected }}</span></div>
+      </div>
+      <div class="field">
+        <label>Cocos iOS JS 调试地址（可选）</label>
+        <input type="text" v-model="settings.cocosInspector" placeholder="iOS 填设备端口如 6086（USB 自动转发）；也可填 host:port">
+        <div class="hint">
+          iOS：填设备上的调试端口（纯数字），工具会通过 USB 自动转发；可在日志页一键「探测」。
+          Android：填 chrome://inspect 显示的 Cocos2d-x Games 地址（host:port）。
+          启用后 JS console 日志会与系统日志合并；Chrome Inspect 窗口和本工具不能同时连接。
+        </div>
+      </div>
+      <div class="field">
+        <label>环境状态</label>
+        <div class="kv">
+          <div class="kv__row"><span>adb 是否可用</span><b :class="env.adbFound?'t-ok':'t-bad'">{{ env.adbFound ? '可用' : '未找到' }}</b></div>
+          <div class="kv__row"><span>版本</span><b>{{ env.adbVersion || '—' }}</b></div>
+          <div class="kv__row"><span>来源</span><b>{{ adbSourceText || '—' }}</b></div>
+          <div class="kv__row"><span>服务端口</span><b>{{ env.serverPort }} · {{ env.serverRunning ? '已启动' : '未启动' }}</b></div>
+          <div class="kv__row"><span>应用名解析</span><b :class="apps.labelStatus.available?'t-ok':'muted'">{{ apps.labelStatus.available ? '可用（' + apps.labelStatus.tool + '）' : '不可用，显示包名' }}</b></div>
+          <div class="kv__row"><span>中文词库</span><b :class="zhStats.loaded?'t-ok':'t-bad'">{{ zhStats.loaded ? ('权限 ' + zhStats.perms.total + ' · 包名 ' + zhStats.pkgs.total) : '未加载' }}</b></div>
+        </div>
+      </div>
+      <div class="hint" v-show="!apps.labelStatus.available">{{ apps.labelStatus.hint }}</div>
+      <div class="hint" v-show="zhStats.loaded">
+        权限与包名优先取静态词库（即时、无需 adb）；未命中的权限显示原名，未命中的应用由 aapt 补齐，仍无则显示包名。
+      </div>
+      <div class="hint t-bad" v-show="zhStats.errors.length">词库加载异常：{{ zhStats.errors.join('；') }}</div>
+    </div>
+    <div class="modal__ft">
+      <button class="btn" @click="settings.open=false">取消</button>
+      <button class="btn btn--primary" @click="saveSettings()">保存并重新检测</button>
+    </div>
+  </div>
+
+  <div class="toast" :class="'toast--'+toastState.cls" v-show="toastState.show">{{ toastState.text }}</div>
+</div>
+
+<script src="vendor/layui/layui.js"></script>
+<script src="vendor/petite-vue.iife.js"></script>
+<script src="js/util.js"></script>
+<script src="js/pages/devices.js"></script>
+<script src="js/pages/logs.js"></script>
+<script src="js/pages/apps.js"></script>
+<script src="js/pages/files.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
