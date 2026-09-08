@@ -48,6 +48,8 @@ if [ "${WITH_IOS:-0}" = "1" ]; then
     "$VPY" -m pip install -q "pymobiledevice3"
 fi
 "$VPY" -m pip install -q "pyinstaller>=6.0" "cython>=3.0"
+# pillow：spec 里 BUNDLE 的 icon 用 config/icon.ico，PyInstaller 需 Pillow 转 .icns
+"$VPY" -m pip install -q "pillow>=10.0"
 
 echo "==> 3/6 Cython 编译 core/*.py -> .so（源码不入包）"
 "$VPY" setup_pyd.py build_ext --inplace

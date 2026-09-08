@@ -192,6 +192,11 @@
             <div class="sidenote">游戏需开启 JS 调试端口；捕获的 console.log 以 jswrapper 显示，纯 USB 转发免管理员</div>
             <div class="empty sm" v-show="logs.cdpRunning" style="color:var(--ok,#238636)">{{ logs.cdpStatusText }}</div>
             <div class="empty sm" v-show="logs.cdpErrorShown" style="color:#f85149">{{ logs.cdpErrorShown }}</div>
+            <div class="btns">
+              <button class="btn btn--sm btn--primary" @click="logs.cocosDebugMode(AdbApp, 'info')" :disabled="!logs.cdpRunning">开启 INFO 日志</button>
+              <button class="btn btn--sm btn--ghost" @click="logs.cocosDebugMode(AdbApp, 'verbose')" :disabled="!logs.cdpRunning">VERBOSE</button>
+            </div>
+            <div class="sidenote">游戏默认级别可能吞 console：连接后点此经调试口执行 cc.debug._resetDebugSetting(DebugMode.INFO)，无需重打包</div>
           </div>
         </template>
 

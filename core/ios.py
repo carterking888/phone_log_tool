@@ -64,6 +64,24 @@ def _require():
     return True
 
 
+def _quiet_mux_loop_handler(loop, context):
+    """常驻循环的自定义异常处理器。
+
+    usbmux 端口转发在设备端口未监听（游戏未运行/切后台）时抛 BadDevError /
+    ConnectionFailedError，pymobiledevice3 转发器任务未取回异常 → asyncio
+    默认处理器把整段栈打印到控制台。这类连接失败属预期行为，CDP 探测已用
+    中文提示（「设备 Inspector 端口 xx 未连通…」），这里静默；其余异常照常输出。
+    """
+    exc = context.get("exception")
+    try:
+        from pymobiledevice3.exceptions import MuxException
+        if isinstance(exc, MuxException):
+            return
+    except Exception:  # noqa: BLE001 - 未装 pymobiledevice3 时兜底
+        pass
+    loop.default_exception_handler(context)
+
+
 def ensure_loop():
     """常驻后台事件循环（daemon 线程）。pymobiledevice3 的服务要在活着的 loop 上跑。"""
     global _loop, _loop_thread
@@ -74,6 +92,7 @@ def ensure_loop():
         # Windows 上 proactor 会打断部分阻塞式 socket 操作（pymobiledevice3 官方注释），
         # 官方 utils.get_asyncio_loop 也特判成 SelectorEventLoop，这里保持一致。
         loop = asyncio.SelectorEventLoop() if os.name == "nt" else asyncio.new_event_loop()
+        loop.set_exception_handler(_quiet_mux_loop_handler)
         t = threading.Thread(target=loop.run_forever, name="ios-loop", daemon=True)
         t.start()
         _loop, _loop_thread = loop, t

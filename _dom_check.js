@@ -75,6 +75,7 @@ function makeStub(win) {
 
   const tasks = {};
   let tid = 0;
+  let lastCocosDebug = null; // 记录 cocos_debug_mode 最近一次调用的 mode（经 win 暴露给检查段）
   const newTask = (kind, title) => {
     tid += 1;
     const id = "T" + tid;
@@ -115,12 +116,16 @@ function makeStub(win) {
     select_device: (s) => ({ ok: true, serial: s }),
     connect_wireless: () => ({ ok: true, output: "connected" }),
     start_logcat: () => ({ ok: true, error: "" }),
+    cocos_debug_mode: (mode) => { lastCocosDebug = mode; win.__lastCocosDebug = mode; return { ok: true, mode, output: "已执行" }; },
     stop_logcat: () => ({ ok: true }),
     clear_logcat: () => ({ ok: true }),
     get_log_batch: (cursor, limit) => {
       const start = Math.max(0, LINES.length - (seq - cursor));
       const chunk = LINES.slice(start, start + (limit || 1500));
-      return { lines: chunk, cursor: cursor + chunk.length, total: LINES.length, seq, running: true, error: "" };
+      // cdpRunning 由 win.__stubCdp 控制（测试 cc.debug 按钮时置 true，避免轮询竞态覆盖）
+      return { lines: chunk, cursor: cursor + chunk.length, total: LINES.length, seq,
+               running: true, error: "", cdpRunning: win.__stubCdp === true,
+               cdpCount: 0, cdpError: "" };
     },
     get_pid_map: () => ({
       map: { 2345: "com.example.sampleapp", 1234: "com.tencent.mm", 3312: "com.ss.android.ugc.aweme", 4400: "[qdss]", 4500: "spddaemon" },
@@ -327,6 +332,29 @@ function makeStub(win) {
   check("iOS 设备时 isIos 为 true", app().isIos === true, String(app().isIos));
   check("日志页出现 Cocos JS 卡片",
     ((q(".side") || {}).textContent || "").indexOf("Cocos JS 日志（USB）") >= 0);
+  {
+    // cc.debug 日志级别按钮：经 CDP 执行 _resetDebugSetting（等价浏览器里手动开 INFO）
+    const infoBtn = $$("button").filter((b) => b.textContent.indexOf("开启 INFO 日志") >= 0)[0];
+    const vbBtn = $$("button").filter((b) => b.textContent.trim() === "VERBOSE")[0];
+    check("Cocos 卡片含「开启 INFO 日志 / VERBOSE」按钮", !!infoBtn && !!vbBtn);
+    check("未连接调试口时按钮禁用", infoBtn && infoBtn.disabled === true,
+      infoBtn && String(infoBtn.disabled));
+    // 轮询 flush 会用 get_log_batch.cdpRunning 重刷状态 → 统一从 stub 的 __stubCdp 控制
+    win.__stubCdp = true;
+    app().logs.cdpRunning = true;
+    await tick(300);
+    check("调试口连接后按钮启用", infoBtn && infoBtn.disabled === false);
+    click(infoBtn);
+    await tick(400);
+    check("INFO 按钮触发 cocos_debug_mode(info)", win.__lastCocosDebug === "info", String(win.__lastCocosDebug));
+    click(vbBtn);
+    await tick(400);
+    check("VERBOSE 按钮传 verbose", win.__lastCocosDebug === "verbose",
+      String(win.__lastCocosDebug) + " disabled=" + (vbBtn && vbBtn.disabled));
+    win.__stubCdp = false;
+    app().logs.cdpRunning = false;
+    await tick(200);
+  }
   app().devices.list = [{ serial: "and-1", platform: "android", state: "device", model: "Pixel" }];
   app().currentSerial = "and-1";
   await tick(400);
@@ -552,10 +580,16 @@ function makeStub(win) {
   /* --------- 6. 设备切换 --------- */
   const devSel = $(".devsel select");
   check("设备下拉有 2 台设备", devSel.options.length === 2, devSel.options.length);
+  // 先在当前设备上布置筛选条件，切换后必须全部清空（新设备日志不被旧条件过滤）
+  app().logs.levels = ["E"];
+  app().logs.keyword = "anr";
+  app().logs.pkg = { package: "com.tencent.mm", label: "微信", pid: 1234 };
   setSelect(devSel, "192.168.1.20:5555");
   await tick(800);
   check("切换设备后详情更新", app().devices.detail && app().devices.detail.model === "Redmi K60",
     app().devices.detail && app().devices.detail.model);
+  check("切换设备清空筛选条件", app().logs.levels.length === 0 && app().logs.keyword === ""
+    && app().logs.pkg.package === "", `${app().logs.levels}/${app().logs.keyword}/${app().logs.pkg.package}`);
 
   /* --------- 7. 应用名解析（aapt 可选） --------- */
   click($$(".nav__item")[2]);

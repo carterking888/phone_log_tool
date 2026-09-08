@@ -94,7 +94,10 @@ h3 { font-size: 14px; }
 }
 
 /* ---------------- 主体 ---------------- */
-.main { height: calc(100% - 56px); overflow: hidden; }
+/* #app 必须自己撑满视口：否则 .main 的百分比高度落在 auto 父容器上失效，
+   内容超窗后被 body 的 overflow:hidden 裁掉，表现为「不能下滑」 */
+#app { height: 100%; display: flex; flex-direction: column; }
+.main { flex: 1 1 auto; min-height: 0; overflow: hidden; }
 .page { display: flex; height: 100%; }
 
 .side {

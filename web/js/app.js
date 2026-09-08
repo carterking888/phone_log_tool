@@ -148,6 +148,8 @@
       this.devices.current = serial;
       Util.call("select_device", serial)
         .then(function () {
+          // 新设备：清掉上一台的日志筛选条件（级别/PID/标签/关键字/包名/选中行）
+          self.logs.resetFilters();
           return self.devices.loadDetail(self);
         })
         .then(function () {

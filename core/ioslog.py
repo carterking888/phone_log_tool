@@ -188,6 +188,11 @@ class IosLogSession(LogcatSession):
         self.cdp_count = 0  # 已捕获的 JS console 行数（给前端展示"管道是否真在吐日志"）
         self._cdp_thread = None
         self._cdp_ws = None
+        self._ws_path = ""  # 最近一次握手成功的 WS path（重连优先复用）
+        # CDP 请求-响应配对：读线程 recv 到带 id 的响应时回填，js_api 线程等待
+        self._cdp_id = 0
+        self._cdp_pend_lock = threading.Lock()
+        self._cdp_pending = {}  # id -> (Event, [response])
         # 后端预过滤（选中应用时由前端传入）：oslog 洪流每秒数百条 com.apple.* 噪声，
         # 不在源头掐掉的话，应用/JS 日志会先被缓冲压缩挤掉、再被前端尾窗顶走，永远看不到。
         pf = pkg if isinstance(pkg, dict) else None
@@ -454,34 +459,49 @@ class IosLogSession(LogcatSession):
                 self.lines = self.lines[-MAX_LINES // 2:]
 
     # -- Cocos Creator / Cocos2d-x V8 Inspector（Chrome DevTools Protocol）
-    def _cdp_ws_url(self):
-        """从 host:port 或 HTTP 地址发现 Cocos Inspector 的 WebSocket 目标。"""
+    def _cdp_ws_candidates(self):
+        """发现 Cocos Inspector 的候选 WebSocket 地址列表（按优先级排序）。
+
+        游戏重启/页面刷新都会更换 target id，旧的 webSocketDebuggerUrl 再握手会得到
+        400 + text/html 错误页；且 targets[0] 未必是活页面。因此每次重连都重新拉
+        /json/list，把「上次成功过的 path > 各目标 URL > 各目标 /devtools/page/<id>
+        > 老版本序号 /devtools/page/0」逐个尝试。
+        """
         addr = self.cocos_inspector
         if not addr:
             raise ValueError("未配置 Cocos Inspector 地址")
+        if "://" in addr and addr.startswith("ws"):
+            return [addr]
         if "://" not in addr:
             addr = "http://" + addr
         parsed = urllib.parse.urlparse(addr)
-        if parsed.scheme in ("ws", "wss"):
-            return addr
-        base = "%s://%s" % (parsed.scheme or "http", parsed.netloc or parsed.path)
-        with urllib.request.urlopen(base.rstrip("/") + "/json/list", timeout=4) as res:
-            targets = json.loads(res.read().decode("utf-8", "replace"))
-        if not targets:
-            raise RuntimeError("未发现 Cocos 调试目标")
-        target = targets[0]
-        ws_url = target.get("webSocketDebuggerUrl")
-        if ws_url:
-            # webSocketDebuggerUrl 里的 host 是目标侧视角（iOS 设备内是 127.0.0.1:6086），
-            # 统一改写为本地访问地址（直连或 usbmux 转发后的本地端口），只保留 path。
-            base_scheme = "wss" if parsed.scheme == "https" else "ws"
-            wpath = urllib.parse.urlparse(ws_url).path
-            return "%s://%s%s" % (base_scheme, parsed.netloc, wpath or "/" + str(target.get("id", "")))
-        target_id = target.get("id")
-        if not target_id:
-            raise RuntimeError("Cocos 调试目标缺少 id")
+        netloc = parsed.netloc or parsed.path
         scheme = "wss" if parsed.scheme == "https" else "ws"
-        return "%s://%s/%s" % (scheme, parsed.netloc or parsed.path, target_id)
+        cands, seen = [], set()
+
+        def add(path):
+            if path and path not in seen:
+                seen.add(path)
+                cands.append("%s://%s%s" % (scheme, netloc, path))
+
+        if self._ws_path:  # 上次握手成功过的 path 优先复用
+            add(self._ws_path)
+        try:
+            with urllib.request.urlopen("http://%s/json/list" % netloc, timeout=3) as res:
+                targets = json.loads(res.read().decode("utf-8", "replace"))
+        except Exception:  # noqa: BLE001 - 列表拉不下来时仍可试老版序号地址
+            targets = []
+        for t in (targets if isinstance(targets, list) else []):
+            ws_url = t.get("webSocketDebuggerUrl")
+            if ws_url:
+                # webSocketDebuggerUrl 里的 host 是目标侧视角（设备内 127.0.0.1:6086），
+                # 只保留 path，host 统一改写为本地访问地址（直连或 usbmux 转发端口）。
+                add(urllib.parse.urlparse(ws_url).path)
+            add("/devtools/page/%s" % t.get("id", ""))
+        add("/devtools/page/0")  # 老版本 Cocos Inspector 按序号索引
+        if not cands:
+            raise RuntimeError("未发现 Cocos 调试目标")
+        return cands
 
     @staticmethod
     def _cdp_arg_text(arg):
@@ -521,6 +541,43 @@ class IosLogSession(LogcatSession):
             if len(self.lines) > MAX_LINES:
                 self.lines = self.lines[-MAX_LINES // 2:]
 
+    def cdp_eval(self, expression, timeout=5):
+        """通过已连接的 CDP 会话在游戏里执行 JS 表达式（如开启 cc.debug 日志级别）。
+
+        发送走 js_api 调用线程，响应由读线程回填（_cdp_pending 配对）。
+        返回 (ok, 输出文本)。
+        """
+        ws = self._cdp_ws
+        if ws is None or not self.cdp_running:
+            return False, "JS 调试口未连接（需先开始捕获，且游戏在前台运行）"
+        with self._cdp_pend_lock:
+            self._cdp_id += 1
+            rid = self._cdp_id
+            ev = threading.Event()
+            box = []
+            self._cdp_pending[rid] = (ev, box)
+        try:
+            ws.send(json.dumps({
+                "id": rid, "method": "Runtime.evaluate",
+                "params": {"expression": expression, "returnByValue": True},
+            }))
+        except Exception as e:  # noqa: BLE001
+            with self._cdp_pend_lock:
+                self._cdp_pending.pop(rid, None)
+            return False, "发送失败：%s" % _as_text(e)
+        if not ev.wait(timeout):
+            with self._cdp_pend_lock:
+                self._cdp_pending.pop(rid, None)
+            return False, "游戏未响应（可能已切后台或刚好重启）"
+        resp = box[0] if box else {}
+        if resp.get("error"):
+            return False, "执行出错：%s" % json.dumps(resp["error"], ensure_ascii=False)[:200]
+        result = (resp.get("result") or {}).get("result") or {}
+        if result.get("subtype") == "error":
+            return False, "JS 异常：" + str(result.get("description") or "")[:200]
+        val = result.get("value") if "value" in result else result.get("description")
+        return True, "已执行" if val is None else _as_text(val)[:200]
+
     def _cdp_probe(self):
         """WS 握手前先探测设备侧 Inspector 是否可连（HTTP /json/list 走同一转发链）。
 
@@ -541,6 +598,26 @@ class IosLogSession(LogcatSession):
                 "设备 Inspector 端口 %s 未连通（游戏需在前台运行并开启 Cocos JS 调试），自动重试中…" % port
             )
 
+    @staticmethod
+    def _cdp_friendly_error(e):
+        """把握手/读取异常翻译成可操作的中文提示（原始异常不透传到 UI）。"""
+        if isinstance(e, (ValueError, RuntimeError)):
+            return str(e)  # 本模块自抛的中文提示，原样展示
+        try:
+            import websocket
+            if isinstance(e, websocket.WebSocketBadStatusException):
+                code = getattr(e, "status_code", None)
+                if not code:
+                    m = re.search(r"\b(\d{3})\b", str(e))
+                    code = m.group(1) if m else "4xx"
+                return ("Inspector 拒绝握手（HTTP %s）——常见原因：① 页面 id 已失效"
+                        "（游戏重启后自动恢复）② 该页面已被其他调试客户端（Safari Web "
+                        "Inspector / 爱思助手等）占用，V8 只允许一个客户端，请关闭后重试。"
+                        "自动重试中…" % code)
+        except Exception:  # noqa: BLE001
+            pass
+        return "%s: %s" % (type(e).__name__, e)
+
     def _cdp_reader(self):
         """独立线程读取 JS console；失败不影响 iOS 系统日志主流。"""
         try:
@@ -560,9 +637,20 @@ class IosLogSession(LogcatSession):
                     self.cdp_running = False
                     self.cdp_error = probe_err
                 else:
-                    ws = websocket.create_connection(
-                        self._cdp_ws_url(), timeout=2, suppress_origin=True
-                    )
+                    # 逐个候选地址握手（游戏重启后 id 会变，400 的候选直接跳过）
+                    last_err = None
+                    for url in self._cdp_ws_candidates():
+                        try:
+                            ws = websocket.create_connection(
+                                url, timeout=2, suppress_origin=True
+                            )
+                            self._ws_path = urllib.parse.urlparse(url).path
+                            break
+                        except Exception as e:  # noqa: BLE001 - 换下一个候选
+                            last_err = e
+                            ws = None
+                    if ws is None:
+                        raise last_err or RuntimeError("未发现可用的 Cocos 调试目标")
                     self._cdp_ws = ws
                     self.cdp_running = True
                     self.cdp_error = ""
@@ -575,10 +663,17 @@ class IosLogSession(LogcatSession):
                         if not raw:
                             break
                         event = json.loads(raw)
-                        if event.get("method") == "Runtime.consoleAPICalled":
+                        if "id" in event:
+                            # Runtime.evaluate 等请求的响应 → 交给等待中的 cdp_eval
+                            with self._cdp_pend_lock:
+                                waiter = self._cdp_pending.pop(event["id"], None)
+                            if waiter is not None:
+                                waiter[1].append(event)
+                                waiter[0].set()
+                        elif event.get("method") == "Runtime.consoleAPICalled":
                             self._inject_cdp_event(event.get("params") or {})
             except Exception as e:  # noqa: BLE001
-                self.cdp_error = "%s: %s" % (type(e).__name__, e)
+                self.cdp_error = self._cdp_friendly_error(e)
             finally:
                 if self._cdp_ws is ws:
                     self._cdp_ws = None
