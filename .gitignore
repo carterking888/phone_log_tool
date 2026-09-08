@@ -20,3 +20,4 @@ core/*.py.src
 diag_verify_*.log
 *.bat
 *.sh
+!build_mac.sh
