@@ -45,8 +45,9 @@
 
   <div class="demobar" v-show="env.demo">
     <span class="demobar__tag">演示模式</span>
-    <span>{{ env.reason || '未检测到设备，当前显示演示数据' }}</span>
+    <span>{{ env.reason || '未检测到设备，当前显示演示数据（手动开启）' }}</span>
     <button class="btn btn--sm btn--primary" @click="refreshEnv()">重新检测</button>
+    <button class="btn btn--sm btn--ghost" @click="setDemo(false)">退出演示模式</button>
   </div>
 
   <main class="main">
@@ -72,7 +73,9 @@
             <button class="btn btn--sm btn--primary" @click="go('logs')">查看日志</button>
           </div>
           <div class="empty" v-show="!devices.list.length">
-            未检测到设备<br><span class="muted sm">请检查 USB 调试开关与数据线</span>
+            未检测到设备<br><span class="muted sm">请检查 USB 调试开关与数据线</span><br>
+            <button class="btn btn--sm btn--ghost" v-show="!env.demo"
+                    @click="setDemo(true)">查看演示模式</button>
           </div>
         </div>
         <button class="btn btn--dash" @click="devices.wifiModal=true">+ 添加更多 ADB 设备</button>

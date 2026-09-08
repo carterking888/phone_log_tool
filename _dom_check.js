@@ -92,11 +92,15 @@ function makeStub(win) {
     return id;
   };
 
+  const ENV = {
+    appVersion: "2.4.0", adbPath: "C:\\platform-tools\\adb.exe", adbVersion: "35.0.2",
+    adbFound: true, serverRunning: true, serverPort: 5037, demo: true, reason: "演示模式（冒烟测试）"
+  };
   return {
-    refresh_env: () => ({
-      appVersion: "2.4.0", adbPath: "C:\\platform-tools\\adb.exe", adbVersion: "35.0.2",
-      adbFound: true, serverRunning: true, serverPort: 5037, demo: true, reason: "演示模式（冒烟测试）"
-    }),
+    refresh_env: () => Object.assign({}, ENV),
+    /* 演示模式显式开关（2026-09 起不再自动回退假数据） */
+    enable_demo: () => { ENV.demo = true; ENV.reason = "未检测到已授权设备：请检查 USB 调试开关 / 数据线 / 「信任此电脑」"; return Object.assign({}, ENV); },
+    disable_demo: () => { ENV.demo = false; ENV.reason = ""; return Object.assign({}, ENV); },
     list_devices: () => [
       { serial: "adb-R3CN10ABCDE-hG9kQ", state: "device", model: "Pixel 8 Pro", device: "husky", product: "husky", transport: "usb", transportId: "1" },
       { serial: "192.168.1.20:5555", state: "device", model: "Redmi K60", device: "mondrian", product: "mondrian", transport: "wifi", transportId: "2" }
@@ -270,6 +274,21 @@ function makeStub(win) {
   check("设备详情字段 >= 6", $$(".detailgrid .dfield").length >= 6, $$(".detailgrid .dfield").length);
   check("提示条有文本", ($(".tipbar__text") || {}).textContent && $(".tipbar__text").textContent.length > 10);
   check("演示模式横幅可见", $(".demobar").style.display !== "none");
+  check("源码含空态「查看演示模式」手动入口（不再自动回退假数据）",
+    html.indexOf("查看演示模式") >= 0);
+  {
+    const exitBtn = [...$(".demobar").querySelectorAll("button")]
+      .filter((b) => b.textContent.indexOf("退出演示模式") >= 0)[0];
+    check("演示横幅含「退出演示模式」按钮", !!exitBtn);
+    click(exitBtn);
+    await tick(500);
+    check("退出演示模式后横幅隐藏且 env.demo=false",
+      $(".demobar").style.display === "none" && app().env.demo === false,
+      "demo=" + app().env.demo);
+    await app().setDemo(true);
+    await tick(500);
+    check("setDemo(true) 后横幅恢复可见", $(".demobar").style.display !== "none");
+  }
   check("当前仅 1 个可见页面", visiblePages().length === 1, visiblePages().length);
   /* --------- 2. 四个 Tab 逐个遍历 --------- */
   const navKeys = ["devices", "logs", "apps", "files"];

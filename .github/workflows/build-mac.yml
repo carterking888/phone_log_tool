@@ -21,6 +21,11 @@ on:
         required: false
         default: true
         type: boolean
+      with_ios:
+        description: '包含 iOS 支持（pymobiledevice3，体积约 +30MB）'
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   build:
@@ -56,6 +61,12 @@ jobs:
         if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
         run: |
           chmod +x build_mac.sh
+          if [ "${{ github.event.inputs.with_ios }}" = "true" ]; then
+            export WITH_IOS=1
+            echo "iOS 支持：启用（pymobiledevice3 将打进包，目标机无需任何 Python 环境）"
+          else
+            echo "iOS 支持：关闭（包体积更小，仅 Android）"
+          fi
           if [ "${{ github.event.inputs.dmg }}" = "true" ]; then
             ./build_mac.sh --dmg
           else
@@ -88,6 +99,10 @@ jobs:
           [ "$SO_N" -ge 10 ] || { echo "[错误] core .so 少于 10 个"; exit 1; }
           find dist/adb_tool.app/Contents -path "*/web/index.html" -print -quit | grep -q . \
               || { echo "[错误] web/index.html 未进包"; exit 1; }
+          # 内置 adb：目标机没有 Android SDK / brew 也能连 Android 设备
+          ADB_BIN="dist/adb_tool.app/Contents/MacOS/public_settings/adb/adb"
+          test -x "$ADB_BIN" || { echo "[错误] 内置 adb 缺失"; exit 1; }
+          "$ADB_BIN" version | head -2
 
       - name: Upload artifacts
         if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
