@@ -183,6 +183,8 @@ class IosLogSession(LogcatSession):
         self._pump_done = threading.Event()
         self._pump_done.set()
         self.cocos_inspector = str(cocos_inspector or "").strip()
+        # 未手动配置端口时由读线程自动发现（游戏在前台运行即可接上，默认开启 JS 捕获）
+        self._auto_cdp = not self.cocos_inspector
         self.cdp_running = False
         self.cdp_error = ""
         self.cdp_count = 0  # 已捕获的 JS console 行数（给前端展示"管道是否真在吐日志"）
@@ -233,21 +235,20 @@ class IosLogSession(LogcatSession):
         if not self.running:
             self.error = "日志流建立超时（%ss）" % wait
             return False
-        if self.cocos_inspector:
-            addr = self.cocos_inspector
-            if addr.isdigit():
-                # 纯数字 = 设备上的 Inspector 端口 → usbmux 转发到本地回环（纯 USB，免 tunnel）
-                self._device_cdp_port = int(addr)
-                ok, msg = self._start_forwarder_sync(serial, int(addr))
-                if not ok:
-                    self.cdp_error = msg
-                else:
-                    self.cocos_inspector = "127.0.0.1:%d" % self._forward_local
-            if self._forward_local or (":" in self.cocos_inspector):
-                self._cdp_thread = threading.Thread(
-                    target=self._cdp_reader, name="ios-cocos-cdp", daemon=True
-                )
-                self._cdp_thread.start()
+        if self.cocos_inspector and self.cocos_inspector.isdigit():
+            # 纯数字 = 设备上的 Inspector 端口 → usbmux 转发到本地回环（纯 USB，免 tunnel）
+            self._device_cdp_port = int(self.cocos_inspector)
+            ok, msg = self._start_forwarder_sync(serial, int(self.cocos_inspector))
+            if not ok:
+                self.cdp_error = msg
+            else:
+                self.cocos_inspector = "127.0.0.1:%d" % self._forward_local
+        # 无论是否配置端口都启动 CDP 读线程：未配置时线程内自动发现端口，
+        # 游戏启动后几秒内自动接上，无需手动点重启。
+        self._cdp_thread = threading.Thread(
+            target=self._cdp_reader, name="ios-cocos-cdp", daemon=True
+        )
+        self._cdp_thread.start()
         return True
 
     def stop(self):
@@ -578,6 +579,36 @@ class IosLogSession(LogcatSession):
         val = result.get("value") if "value" in result else result.get("description")
         return True, "已执行" if val is None else _as_text(val)[:200]
 
+    def _cdp_autodetect(self):
+        """自动发现设备侧 Cocos Inspector 端口并建立 usbmux 转发（未手动配置时）。
+
+        返回 (True, "") 或 (False, 中文提示)。每轮重连都会尝试，游戏启动后
+        几秒内即可自动接上；游戏重启换端口时也会重新发现。
+        """
+        if not self.serial:
+            return False, "未选择设备"
+        loop = ensure_loop()
+        fut = None
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                detect_cocos_port_async(self.serial), loop)
+            port = fut.result(15)
+        except Exception as e:  # noqa: BLE001
+            if fut is not None:
+                fut.cancel()
+            return False, "Cocos 端口探测失败：%s，自动重试中…" % _as_text(e)
+        if not port:
+            return False, ("未发现 Cocos Inspector（游戏需在前台运行并开启 JS 调试），"
+                           "自动重试中…")
+        if int(port) == self._device_cdp_port and self._forward_local:
+            return True, ""  # 端口没变且转发仍在，直接复用
+        ok, msg = self._start_forwarder_sync(self.serial, int(port))
+        if not ok:
+            return False, msg
+        self._device_cdp_port = int(port)
+        self.cocos_inspector = "127.0.0.1:%d" % self._forward_local
+        return True, ""
+
     def _cdp_probe(self):
         """WS 握手前先探测设备侧 Inspector 是否可连（HTTP /json/list 走同一转发链）。
 
@@ -630,12 +661,25 @@ class IosLogSession(LogcatSession):
         while self.running:
             ws = None
             try:
+                # 未手动配置端口：先自动发现设备侧 Inspector（游戏启动后即可接上）
+                if self._auto_cdp and not self._forward_local:
+                    ok, err = self._cdp_autodetect()
+                    if not ok:
+                        self.cdp_running = False
+                        self.cdp_error = err
+                        raise RuntimeError(err)
                 # 先探测：设备端口未监听（游戏未运行/切后台）时不必发起 WS 握手，
                 # 也避免转发器每次尝试连设备端口产生的连接失败噪声。
                 ok, probe_err = self._cdp_probe()
+                if not ok and self._auto_cdp:
+                    # 自动发现模式下探测失败：游戏可能刚启动或重启换了端口，重新发现
+                    self._stop_forwarder()
+                    if self._cdp_autodetect()[0]:
+                        ok, probe_err = self._cdp_probe()
                 if not ok:
                     self.cdp_running = False
                     self.cdp_error = probe_err
+                    raise RuntimeError(probe_err)
                 else:
                     # 逐个候选地址握手（游戏重启后 id 会变，400 的候选直接跳过）
                     last_err = None

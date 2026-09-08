@@ -193,10 +193,10 @@
             <div class="empty sm" v-show="logs.cdpRunning" style="color:var(--ok,#238636)">{{ logs.cdpStatusText }}</div>
             <div class="empty sm" v-show="logs.cdpErrorShown" style="color:#f85149">{{ logs.cdpErrorShown }}</div>
             <div class="btns">
-              <button class="btn btn--sm btn--primary" @click="logs.cocosDebugMode(AdbApp, 'info')" :disabled="!logs.cdpRunning">开启 INFO 日志</button>
-              <button class="btn btn--sm btn--ghost" @click="logs.cocosDebugMode(AdbApp, 'verbose')" :disabled="!logs.cdpRunning">VERBOSE</button>
+              <button class="btn btn--sm btn--primary" @click="logs.cocosDebugMode(AdbApp, 'info')">开启 INFO 日志</button>
+              <button class="btn btn--sm btn--ghost" @click="logs.cocosDebugMode(AdbApp, 'verbose')">VERBOSE</button>
             </div>
-            <div class="sidenote">游戏默认级别可能吞 console：连接后点此经调试口执行 </div>
+            <div class="sidenote">未连接时点击会自动开始捕获并连强调试口（游戏需在前台运行）</div>
           </div>
         </template>
 

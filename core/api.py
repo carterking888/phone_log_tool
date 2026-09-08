@@ -421,13 +421,23 @@ class Api:
     }
 
     def cocos_debug_mode(self, mode="info"):
-        """在游戏里执行 cc.debug._resetDebugSetting(DebugMode.<mode>)。"""
+        """在游戏里执行 cc.debug._resetDebugSetting(DebugMode.<mode>)。
+
+        JS 调试口未连接时自动等待：iOS 会话的读线程会自动发现端口并重连
+        （游戏在前台运行即可接上），最多等 12 秒——点击按钮即可生效，
+        无需先手动重启动捕获。
+        """
         expr = self.COCOS_DEBUG_EXPR.get(str(mode or "").lower())
         if expr is None:
             return {"ok": False, "error": "未知级别 %r（可选 info/verbose/warn/error）" % mode}
         sess = self.session
         if not hasattr(sess, "cdp_eval"):
             return {"ok": False, "error": "当前会话不支持 Cocos JS 调试（仅 iOS 捕获会话可用）"}
+        if not getattr(sess, "running", False):
+            return {"ok": False, "error": "请先开始捕获日志"}
+        deadline = time.time() + 12
+        while (not getattr(sess, "cdp_running", False) and time.time() < deadline):
+            time.sleep(0.3)
         ok, output = sess.cdp_eval(expr)
         action_log.record("cocos_debug_mode", expr, serial=sess.serial, ok=ok, output=output)
         return {"ok": ok, "mode": mode, "output": output}
