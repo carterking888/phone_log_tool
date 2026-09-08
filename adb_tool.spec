@@ -43,6 +43,14 @@ else:
 # ---------------------------------------------------------------------------
 _HERE = os.path.abspath(globals().get('SPECPATH') or os.getcwd())
 _CORE = os.path.join(_HERE, 'core')
+# 应用图标：config/icon.ico 存在则打进产物（Windows EXE 直接嵌入；mac BUNDLE
+# 构建机上需 Pillow 自动转 .icns），不存在则不带图标（用 PyInstaller 默认）。
+APP_ICON = os.path.join(_HERE, 'config', 'icon.ico')
+APP_ICON = APP_ICON if os.path.isfile(APP_ICON) else None
+if APP_ICON:
+    print('[spec] app icon: %s' % APP_ICON)
+else:
+    print('[spec] app icon: none（config/icon.ico 不存在）')
 _MODULES = ('app', 'api', 'adb', 'logcat', 'labels', 'demo', 'action_log', 'zhdict',
             'ios', 'ioslog')
 
@@ -188,6 +196,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=APP_ICON,  # 仅 Windows 生效（EXE 内部 is_win 才嵌入）；mac 由下方 BUNDLE 使用
 )
 coll = COLLECT(
     exe,
@@ -205,7 +214,9 @@ if IS_MAC:
     app = BUNDLE(
         coll,
         name='adb_tool.app',
-        icon=None,
+        # .ico 会在构建时经 Pillow 自动转 .icns（build_mac.sh 已装 pillow）；
+        # APP_ICON 为 None 时 PyInstaller 用自带默认图标。
+        icon=APP_ICON,
         bundle_identifier='com.local.adbtool',
         info_plist={
             'NSHighResolutionCapable': True,

@@ -411,6 +411,27 @@ class Api:
             return {"ok": True, "port": port}
         return {"ok": False, "error": "未发现 Cocos Inspector（游戏需开启 JS 调试端口）"}
 
+    # Cocos 引擎日志级别（cc.debug.DebugMode）：游戏默认级别可能吞掉 console.log，
+    # 经 CDP 下发 _resetDebugSetting 动态打开，无需重打包。
+    COCOS_DEBUG_EXPR = {
+        "verbose": "cc.debug._resetDebugSetting(cc.debug.DebugMode.VERBOSE)",
+        "info": "cc.debug._resetDebugSetting(cc.debug.DebugMode.INFO)",
+        "warn": "cc.debug._resetDebugSetting(cc.debug.DebugMode.WARN)",
+        "error": "cc.debug._resetDebugSetting(cc.debug.DebugMode.ERROR)",
+    }
+
+    def cocos_debug_mode(self, mode="info"):
+        """在游戏里执行 cc.debug._resetDebugSetting(DebugMode.<mode>)。"""
+        expr = self.COCOS_DEBUG_EXPR.get(str(mode or "").lower())
+        if expr is None:
+            return {"ok": False, "error": "未知级别 %r（可选 info/verbose/warn/error）" % mode}
+        sess = self.session
+        if not hasattr(sess, "cdp_eval"):
+            return {"ok": False, "error": "当前会话不支持 Cocos JS 调试（仅 iOS 捕获会话可用）"}
+        ok, output = sess.cdp_eval(expr)
+        action_log.record("cocos_debug_mode", expr, serial=sess.serial, ok=ok, output=output)
+        return {"ok": ok, "mode": mode, "output": output}
+
     def clear_logcat(self):
         if self.session:
             self.session.clear()

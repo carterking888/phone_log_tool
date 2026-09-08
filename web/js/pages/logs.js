@@ -300,6 +300,24 @@ window.logsComponent = function () {
         app.toast("保存失败：" + e.message, "bad");
       });
     },
+    // 经 CDP 在游戏里执行 cc.debug._resetDebugSetting(DebugMode.<mode>)，
+    // 打开被默认级别吞掉的 console 输出（等价浏览器里手动开 INFO）
+    cocosDebugMode: function (app, mode) {
+      var m = mode || "info";
+      if (!this.cdpRunning) {
+        app.toast("JS 调试口未连接：先开始捕获，且游戏需在前台运行", "warn");
+        return;
+      }
+      return Util.call("cocos_debug_mode", m).then(function (r) {
+        if (r && r.ok) {
+          app.toast("已切换 Cocos 日志级别：" + String(m).toUpperCase() + "，重新触发即可看到输出", "ok");
+        } else {
+          app.toast((r && r.error) || "执行失败", "bad");
+        }
+      }).catch(function (e) {
+        app.toast("执行失败：" + e.message, "bad");
+      });
+    },
 
     // ---------------------------------------------------------- 生命周期
     start: function (app) {
@@ -386,7 +404,7 @@ window.logsComponent = function () {
           }
           if (r.cdpError && r.cdpError !== self.cdpErrorShown) {
             self.cdpErrorShown = r.cdpError;
-            app.toast("Cocos JS 日志连接失败：" + r.cdpError + "｜请检查端口或重启游戏", "warn");
+            app.toast("Cocos JS 日志：" + r.cdpError, "warn");
           }
           if (!r.cdpError) self.cdpErrorShown = "";
           self.cdpRunning = !!r.cdpRunning;
@@ -596,6 +614,20 @@ window.logsComponent = function () {
     clearPkg: function (app) {
       this.pkg = { package: "", label: "", pid: 0 };
       if (app && app.isIos && this.running) this.restart(app);
+    },
+    // 切换设备时清空全部筛选条件：新设备的日志不应被上一台设备的条件过滤
+    resetFilters: function () {
+      this.stopPidWatch();
+      this.levels = [];
+      this.pids = [];
+      this.tags = [];
+      this.keyword = "";
+      this.mode = "include";
+      this.pkg = { package: "", label: "", pid: 0 };
+      this.selected = null;
+      this.detailOpen = false;
+      this.frozenRows = null;
+      this.dd = { level: false, pid: false, tag: false };
     },
 
     // 行操作
