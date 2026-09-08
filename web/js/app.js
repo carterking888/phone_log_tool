@@ -265,6 +265,19 @@
     refreshEnv: function () {
       var self = this;
       return this.devices.refresh(this);
+    },
+
+    /* 显式进入/退出演示模式（不再自动回退假数据；接上真机自动退出） */
+    setDemo: function (on) {
+      var self = this;
+      return Util.call(on ? "enable_demo" : "disable_demo")
+        .then(function (env) {
+          self.env = Object.assign({}, self.env, env);
+          return self.devices.refresh(self);
+        })
+        .catch(function (e) {
+          self.toast("演示模式切换失败：" + (e && e.message ? e.message : e), "bad");
+        });
     }
   };
 

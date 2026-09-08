@@ -44,6 +44,9 @@ VPY="$VENV/bin/python"
 
 echo "==> 2/6 安装依赖（pywebview 会自动带 pyobjc）"
 "$VPY" -m pip install -q -r requirements.txt
+if [ "${WITH_IOS:-0}" = "1" ]; then
+    "$VPY" -m pip install -q "pymobiledevice3"
+fi
 "$VPY" -m pip install -q "pyinstaller>=6.0" "cython>=3.0"
 
 echo "==> 3/6 Cython 编译 core/*.py -> .so（源码不入包）"
@@ -51,11 +54,34 @@ echo "==> 3/6 Cython 编译 core/*.py -> .so（源码不入包）"
 ls -1 core/*.so 2>/dev/null | wc -l | xargs echo "    编译产物 .so 数量："
 
 echo "==> 4/6 PyInstaller 打包（.app bundle）"
+APP="dist/adb_tool.app"
 # --no-zip：zip 留到第 6 步 ad-hoc 签名之后再打，否则 zip 里是未签名产物
 "$VPY" pyd_pack.py --no-zip
 
+echo "==> 4.5/6 内置 adb（目标机免装 Android SDK / brew adb）"
+# 放 Contents/MacOS/public_settings/adb/ —— core/adb.py 的 portable_adb_dirs()
+# 会在可执行文件同目录找到它（来源标记 portable）。mac 平台 tools 的 adb 是
+# 自包含单文件，不带 dylib 依赖，直接拷贝即可。
+ADB_DST="$APP/Contents/MacOS/public_settings/adb/adb"
+if [ -x "$ADB_DST" ]; then
+    echo "    已存在，跳过"
+elif [ "${SKIP_BUNDLED_ADB:-0}" = "1" ]; then
+    echo "    [warn] SKIP_BUNDLED_ADB=1，跳过内置（目标机需自备 adb）"
+else
+    ZIP="/tmp/platform-tools-darwin.zip"
+    curl -fL --retry 3 -o "$ZIP" \
+        "https://dl.google.com/android/repository/platform-tools-latest-darwin.zip" \
+        || { echo "[错误] platform-tools 下载失败（SKIP_BUNDLED_ADB=1 可跳过内置）"; exit 1; }
+    rm -rf /tmp/platform-tools
+    unzip -q -o "$ZIP" -d /tmp
+    mkdir -p "$(dirname "$ADB_DST")"
+    cp /tmp/platform-tools/adb "$ADB_DST"
+    chmod +x "$ADB_DST"
+    echo "    adb -> $ADB_DST"
+    "$ADB_DST" version | sed 's/^/    /'
+fi
+
 echo "==> 5/6 解除隔离属性 + ad-hoc 签名"
-APP="dist/adb_tool.app"
 # 本地产物也会被标记 quarantine，导致「已损坏，无法打开」
 xattr -cr "$APP" 2>/dev/null || true
 # ad-hoc 签名（-s -）：不签名 macOS 会直接拒绝启动（代码签名无效）

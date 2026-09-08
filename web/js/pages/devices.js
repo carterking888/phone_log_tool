@@ -94,6 +94,11 @@ window.devicesComponent = function () {
         return d.serial === cur && d.platform === "ios";
       });
       if (!this.env.adbFound && !this.env.iosAvailable) {
+        /* frozen 包里没有 pip，"pip install ..." 只对源码运行有意义 */
+        if (this.env.frozen) {
+          return "未检测到 adb：请在设置中指定 adb 路径（macOS 安装包已内置 adb，"
+            + "Windows 包随附 public_settings/adb）；iOS 支持需以 WITH_IOS=1 重新打包。";
+        }
         return "未检测到 adb，也未提供 iOS 支持：请在设置中指定 platform-tools 路径，或执行 pip install pymobiledevice3 启用 iOS。";
       }
       if (this.onlineList.length === 0) {

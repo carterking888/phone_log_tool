@@ -4,12 +4,14 @@
 约定：
 - 所有方法返回 dict / list，JSON 可序列化；
 - 长任务返回 taskId，前端用 get_task(id) 轮询进度；
-- 演示模式（无 adb 或无设备）走 core.demo 数据，并在 env.demo 中明确标记。
+- 演示模式不再自动回退：无 adb/无设备时列表为空，用户在 UI 里显式进入后走 core.demo 数据
+  （env.demo 明确标记，接上真机自动退出）。
 """
 import json
 import os
 import re
 import shutil
+import sys
 import tarfile
 import tempfile
 import threading
@@ -25,7 +27,7 @@ from . import demo, action_log
 from . import labels as labels_mod
 from . import zhdict
 
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.7.0"
 
 # iOS UDID 形态（40 位 hex / 24 位 hex / 8-16 分段）。platform 缓存没命中时用它兜底判定
 UDID_RE = re.compile(r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{16}|[0-9a-fA-F]{40}|[0-9a-fA-F]{24})$")
@@ -125,6 +127,10 @@ class Api:
             "serverPort": 5037,
             "demo": False,
             "reason": "",
+            # 打包形态信息：前端据此调整提示文案（frozen 包内没有 pip，
+            # "pip install pymobiledevice3" 这类建议只对源码运行有意义）
+            "frozen": bool(getattr(sys, "frozen", False)),
+            "platform": sys.platform,
             # iOS 侧：pymobiledevice3 是否可用、版本、不可用原因、已连接台数
             "iosAvailable": False,
             "iosLibVersion": "",
@@ -187,9 +193,17 @@ class Api:
         self._platforms.update({d["serial"]: "ios" for d in ios_devs})
         self._ios_devices = ios_devs
 
-        # 两边都没有在线设备才进演示模式
-        self.demo = not (online or ios_online)
+        # 演示模式**只在用户显式开启时进入**（enable_demo），不再自动回退——
+        # 没接手机就显示假设备会误导排查。有真机上线时自动退出演示模式。
+        if online or ios_online:
+            self.demo = False
         all_online = online + ios_online
+        if not (found or ios_ok):
+            reason = "未检测到 adb 与 iOS 支持：可在设置中指定 adb 路径（macOS 安装包已内置 adb）"
+        elif not all_online:
+            reason = "未检测到已授权设备：请检查 USB 调试开关 / 数据线 / 「信任此电脑」"
+        else:
+            reason = ""
         self.env.update(
             # adbSource: config | path | sdk | portable | common | fallback
             # 设置页用来告诉用户"当前用的是哪个 adb"（手动指定 / PATH / 便携包）
@@ -199,8 +213,7 @@ class Api:
             demo=self.demo,
             iosAvailable=ios_ok, iosLibVersion=ios_ver, iosReason=ios_reason,
             iosCount=len(ios_online),
-            reason="未检测到 adb 与 iOS 设备，已进入演示模式" if not (found or ios_ok) else
-                   ("未检测到已授权设备，已进入演示模式" if not all_online else ""),
+            reason=reason,
         )
         if all_online:
             if not self.current_serial or self.current_serial not in [d["serial"] for d in all_online]:
@@ -208,6 +221,22 @@ class Api:
         elif self.demo:
             self.current_serial = demo.DEMO_DEVICE["serial"]
         return self.env
+
+    def enable_demo(self):
+        """显式进入演示模式（设备列表为空时预览 UI 用）。
+
+        历史约定是"无 adb/无设备自动进演示模式"，实测会误导：没接手机也显示
+        Pixel 8 Pro / iPhone 假数据，用户分不清真假。改为空列表 + 手动入口。
+        """
+        self.demo = True
+        self.current_serial = demo.DEMO_DEVICE["serial"]
+        return self.refresh_env()
+
+    def disable_demo(self):
+        """退出演示模式，回到真实设备列表（可能为空）。"""
+        self.demo = False
+        self.current_serial = None
+        return self.refresh_env()
 
     def get_env(self):
         if not self.env.get("adbVersion") and not self.adb.exists()[0]:

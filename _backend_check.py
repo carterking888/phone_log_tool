@@ -47,8 +47,9 @@ def probe_dir(api):
 
 def run_common(api):
     env = api.refresh_env()
-    check("环境检测", bool(env.get("adbVersion")) or env.get("demo"),
-          "adb=%s demo=%s" % (env.get("adbVersion"), env.get("demo")))
+    check("环境检测", bool(env.get("adbVersion")) or env.get("reason"),
+          "adb=%s demo=%s reason=%s" % (env.get("adbVersion"), env.get("demo"),
+                                        env.get("reason")))
 
     # 手动指定 adb 路径整链路（用户曾反馈「传入 adb 地址也不行」，
     # 根因是 api.window 暴露导致桥接方法表作废，set_config 404）。
@@ -112,13 +113,17 @@ def run_common(api):
         time.sleep(0.4)
         waited += 0.4
         b = api.get_log_batch(0)
-    check("日志批量拉取", len(b["lines"]) > 0, "%d 行" % len(b["lines"]))
-    if b["lines"]:
-        check("日志行字段完整",
-              all(k in b["lines"][0] for k in ("id", "time", "pid", "tid", "level", "tag", "msg")),
-              json.dumps(b["lines"][0], ensure_ascii=False)[:90])
+    if api.demo:
+        # 演示模式不伪造日志（「演示日志为空」在 run_demo 断言），这里只验游标链路
+        skipped.append("日志批量拉取/字段（演示模式不出假数据）")
     else:
-        skipped.append("日志行字段完整（未取到日志行）")
+        check("日志批量拉取", len(b["lines"]) > 0, "%d 行" % len(b["lines"]))
+        if b["lines"]:
+            check("日志行字段完整",
+                  all(k in b["lines"][0] for k in ("id", "time", "pid", "tid", "level", "tag", "msg")),
+                  json.dumps(b["lines"][0], ensure_ascii=False)[:90])
+        else:
+            skipped.append("日志行字段完整（未取到日志行）")
     c1 = api.get_log_batch(b["cursor"])
     check("游标递增且不重复", c1["cursor"] >= b["cursor"], "%s -> %s" % (b["cursor"], c1["cursor"]))
     api.stop_logcat()
@@ -142,17 +147,21 @@ def run_common(api):
           sysres.get("ok") and len(sysres.get("packages", [])) > 0,
           "%d 个" % len(sysres.get("packages", [])))
 
-    path, entries = probe_dir(api)
-    check("目录列举（含子项）", bool(entries), "%s -> %s" % (path, [e["name"] for e in entries][:4]))
-    if entries:
-        dirs = [e for e in entries if e["isDir"]]
-        if dirs:
-            sub = api.list_dir(dirs[0]["path"])
-            check("进入子目录", sub.get("ok") and bool(sub.get("entries")),
-                  "%s -> %d 项" % (dirs[0]["path"], len(sub.get("entries", []))))
+    if api.demo:
+        # 演示模式不伪造文件/容量数据（run_demo 已断言为空），跳过真机数据用例
+        skipped.append("目录列举/子目录/存储统计（演示模式不出假数据）")
+    else:
+        path, entries = probe_dir(api)
+        check("目录列举（含子项）", bool(entries), "%s -> %s" % (path, [e["name"] for e in entries][:4]))
+        if entries:
+            dirs = [e for e in entries if e["isDir"]]
+            if dirs:
+                sub = api.list_dir(dirs[0]["path"])
+                check("进入子目录", sub.get("ok") and bool(sub.get("entries")),
+                      "%s -> %d 项" % (dirs[0]["path"], len(sub.get("entries", []))))
 
-    ss = api.storage_stats()
-    check("存储统计", bool(ss.get("ok")), "total=%s ready=%s" % (ss.get("total"), ss.get("categoriesReady")))
+        ss = api.storage_stats()
+        check("存储统计", bool(ss.get("ok")), "total=%s ready=%s" % (ss.get("total"), ss.get("categoriesReady")))
 
     tmp = tempfile.mkdtemp(prefix="adbtool_check_")
     try:
@@ -391,7 +400,13 @@ def run_demo(api):
 
 def main():
     api = Api()
-    api.refresh_env()
+    env = api.refresh_env()
+    # 演示模式已改为**显式开启**（不再自动回退）：无真机时这里显式进 demo，
+    # 让通用用例继续有数据可跑——仅限测试脚本内部，产品行为仍是空列表。
+    online = [d for d in api.list_devices() if d.get("state") == "device"]
+    if not online:
+        api.enable_demo()
+        print("\n--- 未连接真机，通用用例走演示数据 ---")
     run_common(api)
     if not api.demo:
         # 真机用例按平台分流：连着 iPhone 时跑 Android 的 dumpsys/pm 用例必然全红
