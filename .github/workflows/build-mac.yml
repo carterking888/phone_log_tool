@@ -4,6 +4,9 @@ name: Build macOS App
 # 借 GitHub Actions 的 mac runner 产出真正的 .app。
 #
 # 用法：Actions 页 -> Build macOS App -> Run workflow（可只选一种架构）
+# 注意：matrix 上下文只能在 step 级 if 里引用（job 级 if 在 matrix
+# 展开前求值，引用 matrix 会报 Unrecognized named-value），所以
+# "单选架构"的跳过逻辑放在每个 step 的 if 上，而不是 job 的 if。
 on:
   workflow_dispatch:
     inputs:
@@ -31,24 +34,26 @@ jobs:
           - os: macos-13
             arch: x86_64
     runs-on: ${{ matrix.os }}
-    # 单选架构时跳过另一个 job
-    if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
 
     steps:
       - uses: actions/checkout@v4
+        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
 
       - name: Set up Python
+        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
 
       - name: Show toolchain
+        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
         run: |
           sw_vers
           uname -m
           xcode-select -p
 
       - name: Build .app
+        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
         run: |
           chmod +x build_mac.sh
           if [ "${{ github.event.inputs.dmg }}" = "true" ]; then
@@ -58,6 +63,7 @@ jobs:
           fi
 
       - name: Smoke test (app 能启动 + 内置 server 可达)
+        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
         run: |
           # .app 里的可执行文件在 Contents/MacOS
           EXE="dist/adb_tool.app/Contents/MacOS/adb_tool"
@@ -78,6 +84,7 @@ jobs:
           test -f dist/adb_tool.app/Contents/MacOS/_internal/web/index.html
 
       - name: Upload artifacts
+        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
         uses: actions/upload-artifact@v4
         with:
           name: adb_tool-macos-${{ matrix.arch }}
@@ -85,7 +92,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload dmg
-        if: ${{ github.event.inputs.dmg == 'true' }}
+        if: ${{ (github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch) && github.event.inputs.dmg == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: adb_tool-macos-${{ matrix.arch }}-dmg

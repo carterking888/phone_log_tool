@@ -18,3 +18,5 @@ core/*.py.src
 # 诊断日志（ADB_TOOL_DIAG=1 时产生）
 *.log
 diag_verify_*.log
+*.bat
+*.sh
