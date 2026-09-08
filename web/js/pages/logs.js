@@ -301,16 +301,23 @@ window.logsComponent = function () {
       });
     },
     // 经 CDP 在游戏里执行 cc.debug._resetDebugSetting(DebugMode.<mode>)，
-    // 打开被默认级别吞掉的 console 输出（等价浏览器里手动开 INFO）
+    // 打开被默认级别吞掉的 console 输出（等价浏览器里手动开 INFO）。
+    // 未开始捕获时自动先开始（iOS 会话默认开启 JS 捕获，端口自动发现）；
+    // 未连接时后端会自动等待重连（最多 12s），无需手动重启。
     cocosDebugMode: function (app, mode) {
+      var self = this;
       var m = mode || "info";
-      if (!this.cdpRunning) {
-        app.toast("JS 调试口未连接：先开始捕获，且游戏需在前台运行", "warn");
+      if (!app.isIos) {
+        app.toast("Cocos JS 调试仅 iOS 设备可用", "warn");
         return;
       }
-      return Util.call("cocos_debug_mode", m).then(function (r) {
+      var begin = this.running ? Promise.resolve() : this.start(app);
+      return Promise.resolve(begin).then(function () {
+        if (!self.running) throw new Error("日志捕获未能启动，无法开启 JS 日志");
+        return Util.call("cocos_debug_mode", m);
+      }).then(function (r) {
         if (r && r.ok) {
-          app.toast("已切换 Cocos 日志级别：" + String(m).toUpperCase() + "，重新触发即可看到输出", "ok");
+          app.toast("已开启 " + String(m).toUpperCase() + " 日志，游戏触发操作即可看到 JS 输出", "ok");
         } else {
           app.toast((r && r.error) || "执行失败", "bad");
         }
@@ -346,7 +353,7 @@ window.logsComponent = function () {
           self.iosMode = (r && r.mode) || "";
           self.startPidWatch(app);
           app.toast("已开始捕获" + (self.iosMode
-            ? " iOS 日志（" + self.iosMode + (r.cdpConfigured ? " + Cocos JS" : "") + "）"
+            ? " iOS 日志（" + self.iosMode + (r.cdpConfigured ? " + Cocos JS" : "，JS 日志自动发现中") + "）"
             : (" " + self.buffer + " 缓冲区日志")), "ok");
         })
         .catch(function (e) {

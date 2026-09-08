@@ -334,23 +334,31 @@ function makeStub(win) {
     ((q(".side") || {}).textContent || "").indexOf("Cocos JS 日志（USB）") >= 0);
   {
     // cc.debug 日志级别按钮：经 CDP 执行 _resetDebugSetting（等价浏览器里手动开 INFO）
+    // 未连接时按钮不再禁用：点击会自动开始捕获并由后端等待重连
     const infoBtn = $$("button").filter((b) => b.textContent.indexOf("开启 INFO 日志") >= 0)[0];
     const vbBtn = $$("button").filter((b) => b.textContent.trim() === "VERBOSE")[0];
     check("Cocos 卡片含「开启 INFO 日志 / VERBOSE」按钮", !!infoBtn && !!vbBtn);
-    check("未连接调试口时按钮禁用", infoBtn && infoBtn.disabled === true,
+    check("调试口未连接时按钮也可点击", infoBtn && infoBtn.disabled === false,
       infoBtn && String(infoBtn.disabled));
     // 轮询 flush 会用 get_log_batch.cdpRunning 重刷状态 → 统一从 stub 的 __stubCdp 控制
     win.__stubCdp = true;
     app().logs.cdpRunning = true;
     await tick(300);
-    check("调试口连接后按钮启用", infoBtn && infoBtn.disabled === false);
     click(infoBtn);
     await tick(400);
     check("INFO 按钮触发 cocos_debug_mode(info)", win.__lastCocosDebug === "info", String(win.__lastCocosDebug));
+    app().logs.cdpRunning = true;
+    await tick(200);
     click(vbBtn);
     await tick(400);
-    check("VERBOSE 按钮传 verbose", win.__lastCocosDebug === "verbose",
-      String(win.__lastCocosDebug) + " disabled=" + (vbBtn && vbBtn.disabled));
+    check("VERBOSE 按钮传 verbose", win.__lastCocosDebug === "verbose", String(win.__lastCocosDebug));
+    // 未开始捕获时点 INFO：应自动 start 再下发
+    win.__lastCocosDebug = null;
+    app().logs.running = false;
+    click(infoBtn);
+    await tick(500);
+    check("未捕获时点 INFO 自动开始捕获", app().logs.running === true, String(app().logs.running));
+    check("自动开始后仍下发 cocos_debug_mode(info)", win.__lastCocosDebug === "info", String(win.__lastCocosDebug));
     win.__stubCdp = false;
     app().logs.cdpRunning = false;
     await tick(200);
