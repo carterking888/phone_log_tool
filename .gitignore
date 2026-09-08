@@ -5,7 +5,7 @@ build/
 *.spec
 !adb_tool.spec
 .workbuddy/
-
+.idea
 # Cython 中间产物（setup_pyd.py 生成；mac 上是 .so）
 core/*.c
 core/*.pyd

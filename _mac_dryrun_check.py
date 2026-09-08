@@ -145,6 +145,70 @@ def check_clang_env():
           os.environ.get("ARCHFLAGS") == "-arch x86_64", os.environ.get("ARCHFLAGS"))
 
 
+# --------------------------------------------------- 4. check() × BUNDLE 布局
+def check_check_layout():
+    """用 PyInstaller 6 macOS BUNDLE 的真实布局跑一遍 pyd_pack.check()。
+
+    布局依据 PyInstaller/building/osx.py：可执行文件进 Contents/MacOS、
+    二进制(.so)进 Contents/Frameworks、数据文件进 Contents/Resources
+    （cross-link 符号链接省略——glob 本就不跟随目录链接）。
+    曾经的事故：check 按 Windows 的 Contents/MacOS/_internal 找，
+    mac 上全部误报 MISSING 导致 CI exit 2。
+    """
+    sys.path.insert(0, HERE)
+    for m in ("pyd_pack",):
+        sys.modules.pop(m, None)
+    try:
+        import pyd_pack as pp
+    except Exception as e:
+        check("pyd_pack 可导入", False, "%s: %s" % (type(e).__name__, e))
+        return
+
+    import shutil
+    import tempfile
+    app = os.path.join(tempfile.mkdtemp(prefix="_fake_bundle_"), "adb_tool.app")
+    c = os.path.join(app, "Contents")
+    try:
+        os.makedirs(os.path.join(c, "MacOS"))
+        os.makedirs(os.path.join(c, "Frameworks", "core"))
+        os.makedirs(os.path.join(c, "Frameworks", "objc"))
+        os.makedirs(os.path.join(c, "Resources", "web"))
+        os.makedirs(os.path.join(c, "Resources", "config"))
+
+        with open(os.path.join(c, "MacOS", "adb_tool"), "wb") as f:
+            f.write(b"\xcf\xfa\xed\xfe")  # Mach-O magic
+        for m in pp.MODULES:
+            fn = os.path.join(c, "Frameworks", "core",
+                              "%s.cpython-313-darwin.so" % m)
+            with open(fn, "wb") as f:
+                f.write(b"\x00")
+        # 空壳 __init__.py 不算泄露
+        with open(os.path.join(c, "Frameworks", "core", "__init__.py"), "wb") as f:
+            f.write(b"")
+        with open(os.path.join(c, "Frameworks", "objc",
+                               "_objc.cpython-313-darwin.so"), "wb") as f:
+            f.write(b"\x00")
+        with open(os.path.join(c, "Resources", "web", "index.html"), "wb") as f:
+            f.write(b"<html></html>")
+        for j in ("android_perms_zh.json", "android_pkg_names.json"):
+            with open(os.path.join(c, "Resources", "config", j), "wb") as f:
+                f.write(b"{}")
+
+        old_app = pp.APP_DIR
+        old_dist = pp.DIST
+        pp.APP_DIR = app
+        pp.DIST = os.path.join(app, "Contents", "MacOS")
+        try:
+            ret = pp.check()
+        finally:
+            pp.APP_DIR = old_app
+            pp.DIST = old_dist
+        check("check() 在模拟 BUNDLE 布局下通过", ret is True,
+              "返回 %r" % ret)
+    finally:
+        shutil.rmtree(os.path.dirname(app), ignore_errors=True)
+
+
 def main():
     print("=== macOS 打包路径离线预检（模拟 sys.platform='darwin'）===\n")
     old = sys.platform
@@ -156,6 +220,7 @@ def main():
         check_spec()
         check_pyd_pack()
         check_clang_env()
+        check_check_layout()
     finally:
         sys.platform = old
         if had_uname:

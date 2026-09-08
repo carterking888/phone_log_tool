@@ -226,43 +226,71 @@ def check():
     (ok if exe_ok else errs).append(
         "exe: %s" % ("OK" if exe_ok else "MISSING"))
 
-    # 每个模块都必须有编译产物：少一个说明 spec 的 import 闭包没覆盖到
-    missing = [m for m in MODULES
-               if not glob.glob(os.path.join(INTERNAL, "core", m + "*." + EXT))]
-    (ok if not missing else errs).append(
-        "core %s: %d/%d %s" % (EXT, len(MODULES) - len(missing), len(MODULES),
-                               missing and ("missing " + ",".join(missing)) or "all OK"))
-
-    # 业务源码绝不能出现在包里（core/__init__.py 是空壳，不算泄露）
-    leaked = [os.path.basename(p) for p in
-              glob.glob(os.path.join(INTERNAL, "core", "*.py"))
-              if os.path.basename(p) != "__init__.py"]
-    (ok if not leaked else errs).append(
-        "leaked py: %s" % (leaked or "none"))
-
-    for rel in ("web/index.html", "config/android_perms_zh.json",
-                "config/android_pkg_names.json"):
-        p = os.path.join(INTERNAL, rel.replace("/", os.sep))
-        (ok if os.path.isfile(p) else errs).append(
-            "%s: %s" % (rel, "OK" if os.path.isfile(p) else "MISSING"))
-
     if IS_MAC:
+        # PyInstaller 6 的 macOS BUNDLE 会把 onedir 布局整个重排（与 Windows 的
+        # Contents/MacOS/_internal 完全不同），按文件类型分家：
+        #   可执行文件  -> Contents/MacOS
+        #   二进制(.so) -> Contents/Frameworks
+        #   数据文件    -> Contents/Resources
+        # 再用符号链接互跨（sys._MEIPASS 指向 Contents/Frameworks）。
+        # 所以 mac 上不能按固定 INTERNAL 路径找，统一在整个 .app 里递归查。
+        # （glob 默认不跟随目录符号链接，不会把 cross-link 副本重复算进来）
+        def _app_glob(rel):
+            return glob.glob(os.path.join(APP_DIR, "Contents", "**",
+                                          rel.replace("/", os.sep)),
+                             recursive=True)
+
+        # 每个模块都必须有编译产物：少一个说明 spec 的 import 闭包没覆盖到
+        missing = [m for m in MODULES if not _app_glob("core/" + m + "*." + EXT)]
+        (ok if not missing else errs).append(
+            "core %s: %d/%d %s" % (EXT, len(MODULES) - len(missing), len(MODULES),
+                                   missing and ("missing " + ",".join(missing)) or "all OK"))
+
+        # 业务源码绝不能出现在包里（core/__init__.py 是空壳，不算泄露）
+        leaked = [os.path.basename(p) for p in _app_glob("core/*.py")
+                  if os.path.basename(p) != "__init__.py"]
+        (ok if not leaked else errs).append(
+            "leaked py: %s" % (leaked or "none"))
+
+        for rel in ("web/index.html", "config/android_perms_zh.json",
+                    "config/android_pkg_names.json"):
+            hit = _app_glob(rel)
+            (ok if hit else errs).append(
+                "%s: %s" % (rel, "OK" if hit else "MISSING"))
+
         # macOS 走 Cocoa/WKWebView，不依赖 .NET；改查 pyobjc 是否进包
-        objc = glob.glob(os.path.join(INTERNAL, "**", "objc", "*.so"),
-                         recursive=True) or \
-            glob.glob(os.path.join(INTERNAL, "PyObjCTools"))
+        objc = _app_glob("objc/*.so") or _app_glob("PyObjCTools")
         (ok if objc else errs).append(
             "pyobjc: %s" % ("OK" if objc else "MISSING（pywebview 无法起窗口）"))
     else:
+        # 每个模块都必须有编译产物：少一个说明 spec 的 import 闭包没覆盖到
+        missing = [m for m in MODULES
+                   if not glob.glob(os.path.join(INTERNAL, "core", m + "*." + EXT))]
+        (ok if not missing else errs).append(
+            "core %s: %d/%d %s" % (EXT, len(MODULES) - len(missing), len(MODULES),
+                                   missing and ("missing " + ",".join(missing)) or "all OK"))
+
+        # 业务源码绝不能出现在包里（core/__init__.py 是空壳，不算泄露）
+        leaked = [os.path.basename(p) for p in
+                  glob.glob(os.path.join(INTERNAL, "core", "*.py"))
+                  if os.path.basename(p) != "__init__.py"]
+        (ok if not leaked else errs).append(
+            "leaked py: %s" % (leaked or "none"))
+
+        for rel in ("web/index.html", "config/android_perms_zh.json",
+                    "config/android_pkg_names.json"):
+            p = os.path.join(INTERNAL, rel.replace("/", os.sep))
+            (ok if os.path.isfile(p) else errs).append(
+                "%s: %s" % (rel, "OK" if os.path.isfile(p) else "MISSING"))
+
         rt = glob.glob(os.path.join(INTERNAL, "pythonnet", "runtime", "*.dll"))
         (ok if len(rt) > 50 else errs).append("pythonnet runtime dll: %d" % len(rt))
 
         cl = glob.glob(os.path.join(INTERNAL, "clr_loader", "ffi", "dlls",
-                                   "*", "ClrLoader.dll"))
+                                    "*", "ClrLoader.dll"))
         (ok if cl else errs).append(
             "ClrLoader.dll: %s" % ("OK" if cl else "MISSING"))
 
-    if not IS_MAC:
         bat = os.path.join(APP_DIR, "fix_and_check.bat")
         (ok if os.path.isfile(bat) else errs).append(
             "fix_and_check.bat: %s" % ("OK" if os.path.isfile(bat) else "MISSING"))

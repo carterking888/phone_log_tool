@@ -79,9 +79,15 @@ jobs:
             echo "[错误] 进程 15s 内退出（依赖缺失或签名问题）"
             exit 1
           fi
-          # pyobjc / web 资源是否进包
-          ls dist/adb_tool.app/Contents/MacOS/_internal/core/*.so | wc -l
-          test -f dist/adb_tool.app/Contents/MacOS/_internal/web/index.html
+          # pyobjc / web 资源是否进包。
+          # 注意：PyInstaller 6 的 BUNDLE 会按类型重排目录——二进制(.so)进
+          # Contents/Frameworks、数据文件进 Contents/Resources，没有 _internal，
+          # 所以这里用 find 全 bundle 搜，不写死具体子目录。
+          SO_N=$(find dist/adb_tool.app/Contents -path "*/core/*.so" | wc -l)
+          echo "core .so 数量: $SO_N"
+          [ "$SO_N" -ge 10 ] || { echo "[错误] core .so 少于 10 个"; exit 1; }
+          find dist/adb_tool.app/Contents -path "*/web/index.html" -print -quit | grep -q . \
+              || { echo "[错误] web/index.html 未进包"; exit 1; }
 
       - name: Upload artifacts
         if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
