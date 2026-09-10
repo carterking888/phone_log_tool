@@ -10,6 +10,9 @@ name: Release
 #      - device_bebugging_tool_v2.7.1_macos_arm64.zip  （Apple Silicon）
 #      - device_bebugging_tool_v2.7.1_macos_x86_64.zip （Intel）
 # CI 会校验 tag 与 APP_VERSION 一致，不一致直接失败（防止版本错位）。
+#
+# 构建源固定为 main 分支：无论 tag 打在哪个分支上，产物一律取 main 的代码，
+# 避免把还未合并进 main 的改动发布出去。
 
 on:
   push:
@@ -17,6 +20,9 @@ on:
 
 permissions:
   contents: write
+
+env:
+  BUILD_REF: main   # 改这里可切换发版构建源分支
 
 jobs:
   macos:
@@ -31,7 +37,17 @@ jobs:
             arch: x86_64
     runs-on: ${{ matrix.os }}
     steps:
+      # 发版代码源固定 main（tag 打在别的分支也不会带出未合并的改动）
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BUILD_REF }}
+          fetch-depth: 0
+
+      - name: Show build source
+        run: |
+          echo "tag      : ${GITHUB_REF_NAME}"
+          echo "build ref: ${{ env.BUILD_REF }} -> $(git rev-parse --short HEAD)"
+          echo "subject  : $(git log -1 --format=%s)"
 
       - uses: actions/setup-python@v5
         with:
@@ -73,7 +89,18 @@ jobs:
     env:
       WITH_IOS: '1'   # adb_tool.spec 读取：打进 pymobiledevice3（iOS 支持）
     steps:
+      # 发版代码源固定 main（tag 打在别的分支也不会带出未合并的改动）
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BUILD_REF }}
+          fetch-depth: 0
+
+      - name: Show build source
+        shell: bash
+        run: |
+          echo "tag      : ${GITHUB_REF_NAME}"
+          echo "build ref: ${{ env.BUILD_REF }} -> $(git rev-parse --short HEAD)"
+          echo "subject  : $(git log -1 --format=%s)"
 
       - uses: actions/setup-python@v5
         with:
