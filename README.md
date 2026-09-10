@@ -1,7 +1,45 @@
 # ADB 日志与设备调试工具
 
 支持 **Android（adb）** 与 **iOS（pymobiledevice3，可选）** 双平台：
-设备管理 / 实时日志 / 应用包管理 / 文件管理 四大模块。
+设备管理 / 日志查看 / 应用包管理 / 文件管理 四大模块。
+
+## 功能一览
+
+![设备页](docs/images/01_device_page.png)
+
+**设备**
+- Android / iOS 设备混列管理，USB 与无线 ADB（`adb connect`）一体
+- ADB 环境自检（版本 / 路径来源 / server 状态 5037）、设备授权状态一目了然
+- 设备详情：型号 / 系统版本 / 内核 / 架构 / Root 权限 / 电量，一键复制列号
+
+![日志页](docs/images/02_logs_page.png)
+
+**日志查看**
+- main / system / crash / events 四缓冲区实时流，内存环形 5 万行
+- 筛选：按包名过滤、级别 / PID / 标签多选、多关键字（空格分隔 OR 匹配）、关键字高亮
+- 暂停 / 继续 / 清空 / 保存日志；取消自动滚动 = 冻结当前视图安心阅读
+- Cocos JS 日志（USB）：自动发现调试端口并连接，捕获游戏 console 输出（jswrapper）；
+  「开启 INFO 日志 / VERBOSE」按钮经调试口动态打开引擎日志级别，无需重打包
+
+![Cocos JS 捕获](docs/images/03_logs_cocos.png)
+
+![应用包管理](docs/images/04_apps_page.png)
+
+**应用包管理**
+- 全部 / 用户 / 系统 / 三方 / 已禁用分类，应用存储占用统计
+- 安装 APK：拖拽或浏览，支持 `.apk / .xapk / .apks`（≤2GB），
+  可选 `-r` 覆盖 / `-d` 降级 / `-g` 授权 / `-t` 测试包，实时抓取安装日志
+- 卸载（含批量）、应用详情；iOS 设备应用列表同步展示
+
+![安装 APK](docs/images/05_install_apk.png)
+
+![文件管理](docs/images/06_files_page.png)
+
+**文件管理**
+- 快捷目录（/sdcard、/data、/storage/emulated）、设备存储容量统计
+- 地址栏直达、列表 / 网格视图、排序、目录内搜索
+- 上传 / 新建文件夹 / 下载 / 重命名 / 删除，批量下载与批量删除
+- 私有目录（/data/data）自动 run-as 回退（debuggable 包）
 
 ## 运行
 
@@ -51,7 +89,8 @@ _dom_check.js 等        离线回归脚本（见下）
 - **实时日志**：后端子进程/流式入库，前端自适应轮询（有新日志 400ms，空闲 2s）；
   内存环形上限 5 万行；暂停只停渲染，恢复一次性补齐。
 - **Cocos JS 捕获（iOS）**：usbmux 端口转发 + CDP 捕获 console，纯 USB 免管理员；
-  游戏重启自动重连（多候选地址依次握手）；「开启 INFO 日志」按钮经调试口执行
+  调试端口自动发现（开始捕获即连接，无需手动重启），游戏重启自动重连
+  （多候选地址依次握手）；「开启 INFO 日志」按钮经调试口执行
   `cc.debug._resetDebugSetting(DebugMode.INFO)`，无需重打包。
 - **长任务**：push/pull/install/uninstall 全部返回 taskId，前端 300ms 轮询，可取消；
   安装进度靠 push 后按目标端 stat 计算速率；`.xapk/.apks` 走 install-create 会话。
@@ -66,7 +105,7 @@ _dom_check.js 等        离线回归脚本（见下）
 ## 验证（无需真机即可跑大部分）
 
 ```bash
-node _dom_check.js            # jsdom 渲染+交互冒烟，97 项
+node _dom_check.js            # jsdom 渲染+交互冒烟，99 项
 python _backend_check.py      # 后端自测（真机+演示模式双跑，按平台分流）
 python _mac_dryrun_check.py   # Windows 上模拟 darwin 预检 mac 打包分支
 python _render_check.py       # 真实窗口渲染冒烟（需桌面会话）
