@@ -58,12 +58,25 @@ python main.py            # 或双击 run.bat
 | 平台 | 命令 | 产物 |
 | --- | --- | --- |
 | Windows | `build_pyd.bat`（pyd 混淆 + onedir，需 MSVC） | `dist\adb_tool\`，**整目录分发** |
-| macOS | `./build_mac.sh`（自建 venv，自动内置 adb） | `dist/adb_tool.app` + zip |
+| macOS | `./build_mac.sh`（自建 venv，自动内置 adb） | `dist/device_bebugging_tool.app` + `device_bebugging_tool_macos_<arch>.zip` |
 | macOS 免机器 | GitHub Actions → Build macOS App（可选 with_ios / dmg） | Artifacts 下载 |
 
 - Windows 产物含 `fix_and_check.bat`：目标机首次解压后跑一次（解 MOTW + 查 .NET 4.7.2 + WebView2）。
-- mac 产物首次打开右键 → 打开；网络下载的包若报「已损坏」执行 `xattr -cr adb_tool.app`。
+- mac 产物首次打开右键 → 打开；网络下载的包若报「已损坏」执行
+  `xattr -cr device_bebugging_tool.app`。
 - iOS 支持需在打包时以 `WITH_IOS=1`（脚本会询问）装入 pymobiledevice3，产物内嵌运行时，目标机免 Python 环境。
+
+### 发版（打 tag 自动出双平台包）
+
+分发 zip 名称自带版本号（取自 `core/api.py` 的 `APP_VERSION`），如
+`device_bebugging_tool_v2.7.0_win64.zip` / `device_bebugging_tool_v2.7.0_macos_arm64.zip`。
+
+```bash
+# 1. 确认 core/api.py 的 APP_VERSION 已改为发布版本并提交
+git tag v2.7.0 && git push origin v2.7.0
+# 2. 等 Release workflow 跑完，产物自动挂到 GitHub Releases
+#    （CI 校验 tag 与 APP_VERSION 一致，不一致会失败）
+```
 
 ## 目录结构
 

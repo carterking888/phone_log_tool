@@ -1,0 +1,117 @@
+name: Release
+
+# 打 tag 自动打包双平台产物并挂到 GitHub Release，文件名自带版本号。
+#
+# 发版流程（三步）：
+#   1. 把 core/api.py 的 APP_VERSION 改成发布版本（如 "2.7.1"），提交
+#   2. git tag v2.7.1 && git push origin v2.7.1
+#   3. 等 CI 跑完，Releases 页自动出现带产物的版本
+#      - device_bebugging_tool_v2.7.1_win64.zip        （Windows pyd 包，含 iOS 支持）
+#      - device_bebugging_tool_v2.7.1_macos_arm64.zip  （Apple Silicon）
+#      - device_bebugging_tool_v2.7.1_macos_x86_64.zip （Intel）
+# CI 会校验 tag 与 APP_VERSION 一致，不一致直接失败（防止版本错位）。
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-14+ 是 Apple Silicon(arm64)；macos-13 是最后一档 Intel(x86_64)
+          - os: macos-14
+            arch: arm64
+          - os: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Version check（tag 必须等于 core/api.py 的 APP_VERSION）
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          APP_VER=$(grep -oE 'APP_VERSION *= *"[^"]+"' core/api.py | head -1 | cut -d'"' -f2)
+          echo "tag=v$TAG  APP_VERSION=$APP_VER"
+          [ "$TAG" = "$APP_VER" ] \
+            || { echo "[错误] tag v$TAG 与 APP_VERSION $APP_VER 不一致：改 APP_VERSION 后重新打 tag"; exit 1; }
+
+      - name: Build .app（WITH_IOS=1，内置 adb，zip 名自带版本号）
+        run: |
+          chmod +x build_mac.sh
+          WITH_IOS=1 ./build_mac.sh
+
+      - name: Smoke test（可执行文件存在且进程能活过初始化）
+        run: |
+          NAME="device_bebugging_tool"
+          VER="${GITHUB_REF_NAME#v}"
+          EXE="dist/$NAME.app/Contents/MacOS/$NAME"
+          test -x "$EXE" || { echo "[错误] 找不到 $EXE"; exit 1; }
+          test -f "dist/${NAME}_v${VER}_macos_${{ matrix.arch }}.zip" \
+            || { echo "[错误] 分发 zip 未生成"; exit 1; }
+          "$EXE" & PID=$!
+          sleep 15
+          kill -0 "$PID" 2>/dev/null && { echo "进程存活 15s -> OK"; kill "$PID" || true; } \
+            || { echo "[错误] 进程 15s 内退出"; exit 1; }
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/device_bebugging_tool_v*_macos_*.zip
+
+  windows:
+    runs-on: windows-latest
+    env:
+      WITH_IOS: '1'   # adb_tool.spec 读取：打进 pymobiledevice3（iOS 支持）
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Version check（tag 必须等于 core/api.py 的 APP_VERSION）
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          APP_VER=$(grep -oE 'APP_VERSION *= *"[^"]+"' core/api.py | head -1 | cut -d'"' -f2)
+          echo "tag=v$TAG  APP_VERSION=$APP_VER"
+          [ "$TAG" = "$APP_VER" ] \
+            || { echo "[错误] tag v$TAG 与 APP_VERSION $APP_VER 不一致：改 APP_VERSION 后重新打 tag"; exit 1; }
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q -r requirements.txt "cython>=3.0" "pyinstaller>=6.0" setuptools wheel
+
+      - name: Cython build（core/*.py -> *.pyd，源码不入包）
+        run: python setup_pyd.py build_ext --inplace
+
+      - name: PyInstaller pack + zip（zip 名自带版本号）
+        run: python pyd_pack.py
+
+      - name: Smoke test（产物完整）
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          test -f "dist/device_bebugging_tool_v${VER}_win64.zip" \
+            || { echo "[错误] 分发 zip 未生成"; exit 1; }
+          test -f "dist/adb_tool/adb_tool.exe" \
+            || { echo "[错误] adb_tool.exe 未生成"; exit 1; }
+          N=$(find dist/adb_tool -path "*core*.pyd" | wc -l)
+          echo "core pyd 数量: $N"
+          [ "$N" -ge 10 ] || { echo "[错误] core pyd 少于 10 个"; exit 1; }
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/device_bebugging_tool_v*_win64.zip

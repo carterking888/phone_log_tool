@@ -12,13 +12,20 @@
 平台差异（IS_MAC 分支）：
 - Windows：EdgeChromium + pythonnet，产物 dist\\adb_tool\\adb_tool.exe
 - macOS  ：Cocoa/WKWebView，无 pythonnet，末尾多一个 BUNDLE 产出
-  dist/adb_tool.app（否则只有裸 unix 可执行文件，双击不起 app）
+  dist/<APP>.app（否则只有裸 unix 可执行文件，双击不起 app）
+
+产物名分平台：mac 包为 device_bebugging_tool（.app / 可执行文件同名），
+Windows 仍为 adb_tool。改这里即可改名，build_mac.sh / build-mac.yml / pyd_pack.py
+的 APP 常量需同步。
 """
 import ast
 import os
 import sys
 
 IS_MAC = sys.platform == 'darwin'
+# 可执行文件 & bundle 统一名（BUNDLE 拿 COLLECT 里的 EXECUTABLE 名做
+# CFBundleExecutable，所以 exe / COLLECT / BUNDLE 三处必须用同一个名字）
+APP = 'device_bebugging_tool' if IS_MAC else 'adb_tool'
 
 # pythonnet / clr_loader 只在 Windows 需要；macOS 没装它们，
 # collect_all 只会刷一堆 "package not found" warning。
@@ -185,7 +192,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='adb_tool',
+    name=APP,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -205,15 +212,15 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name='adb_tool',
+    name=APP,
 )
 
 # macOS：COLLECT 只有裸 unix 可执行文件，必须再套一层 .app bundle，
-# 否则双击无反应、也没有 Dock 图标。产物在 dist/adb_tool.app
+# 否则双击无反应、也没有 Dock 图标。产物在 dist/<APP>.app
 if IS_MAC:
     app = BUNDLE(
         coll,
-        name='adb_tool.app',
+        name=APP + '.app',
         # .ico 会在构建时经 Pillow 自动转 .icns（build_mac.sh 已装 pillow）；
         # APP_ICON 为 None 时 PyInstaller 用自带默认图标。
         icon=APP_ICON,

@@ -2,7 +2,7 @@
 # macOS 一键打包：venv -> Cython 编译 .so -> PyInstaller .app -> 签名 -> 分发包
 #
 # 用法：
-#   ./build_mac.sh            # 产出 dist/adb_tool.app + zip
+#   ./build_mac.sh            # 产出 dist/device_bebugging_tool.app + zip
 #   ./build_mac.sh --dmg      # 额外再打一个 dmg
 #
 # 前提：
@@ -56,7 +56,9 @@ echo "==> 3/6 Cython 编译 core/*.py -> .so（源码不入包）"
 ls -1 core/*.so 2>/dev/null | wc -l | xargs echo "    编译产物 .so 数量："
 
 echo "==> 4/6 PyInstaller 打包（.app bundle）"
-APP="dist/adb_tool.app"
+# 产物名（须与 adb_tool.spec 的 APP / pyd_pack.py 的 APP 保持一致）
+NAME="device_bebugging_tool"
+APP="dist/$NAME.app"
 # --no-zip：zip 留到第 6 步 ad-hoc 签名之后再打，否则 zip 里是未签名产物
 "$VPY" pyd_pack.py --no-zip
 
@@ -92,21 +94,24 @@ codesign --force --deep --timestamp=none -s - "$APP" 2>/dev/null \
     || echo "    [warn] codesign 失败（不影响本机运行，分发给他人会被告警）"
 
 echo "==> 6/6 生成分发包"
-rm -f "dist/adb_tool_macos_${ARCH}.zip"
+# 版本号与 core/api.py 的 APP_VERSION 同源（pyd_pack 跑完源码已恢复，可直接读）
+VER=$("$VPY" -c "import re;print(re.search(r'APP_VERSION\s*=\s*\"([^\"]+)\"', open('core/api.py', encoding='utf-8').read()).group(1))")
+echo "    版本: v$VER（取自 core/api.py APP_VERSION）"
+rm -f "dist/${NAME}_v${VER}_macos_${ARCH}.zip"
 # zip -y 保留符号链接：.app 内部 Frameworks 依赖软链，丢了会起不来
-(cd dist && zip -qry "adb_tool_macos_${ARCH}.zip" "adb_tool.app")
-echo "    dist/adb_tool_macos_${ARCH}.zip  ($(du -sh "$APP" | cut -f1) -> $(du -h "dist/adb_tool_macos_${ARCH}.zip" | cut -f1))"
+(cd dist && zip -qry "${NAME}_v${VER}_macos_${ARCH}.zip" "$NAME.app")
+echo "    dist/${NAME}_v${VER}_macos_${ARCH}.zip  ($(du -sh "$APP" | cut -f1) -> $(du -h "dist/${NAME}_v${VER}_macos_${ARCH}.zip" | cut -f1))"
 
 if [ "$MAKE_DMG" = "1" ]; then
-    DMG="dist/adb_tool_macos_${ARCH}.dmg"
+    DMG="dist/${NAME}_v${VER}_macos_${ARCH}.dmg"
     rm -f "$DMG"
-    hdiutil create -volname "ADB Tool" -srcfolder "$APP" -ov -format UDZO "$DMG" >/dev/null
+    hdiutil create -volname "Device Debugging Tool" -srcfolder "$APP" -ov -format UDZO "$DMG" >/dev/null
     echo "    $DMG"
 fi
 
 echo
 echo "完成。运行：open $APP"
-echo "分发：把 dist/adb_tool_macos_${ARCH}.zip 发给同芯片的 mac；"
+echo "分发：把 dist/${NAME}_v${VER}_macos_${ARCH}.zip 发给同芯片的 mac；"
 echo "      对方解压后若提示「已损坏/无法打开」，执行一次："
-echo "        xattr -cr adb_tool.app"
+echo "        xattr -cr $NAME.app"
 echo "      若提示「无法验证开发者」：右键 -> 打开（仅首次）"

@@ -80,7 +80,8 @@ def check_spec():
     check("调用了 BUNDLE（否则只有裸可执行文件）", bool(b), "有" if b else "缺")
     if b:
         kw = b[0][1]
-        check("BUNDLE name 是 .app", kw.get("name") == "adb_tool.app", kw.get("name"))
+        check("BUNDLE name 是 .app",
+              kw.get("name") == "device_bebugging_tool.app", kw.get("name"))
         check("BUNDLE 有 bundle_identifier", bool(kw.get("bundle_identifier")),
               kw.get("bundle_identifier"))
 
@@ -96,9 +97,12 @@ def check_pyd_pack():
         check("pyd_pack 可导入", False, "%s: %s" % (type(e).__name__, e))
         return
     check("扩展名后缀是 .so", pp.EXT == "so", pp.EXT)
-    ok_dir = pp.APP_DIR.endswith(os.path.join("dist", "adb_tool.app"))
-    check("产物目录是 dist/adb_tool.app", ok_dir, pp.APP_DIR)
-    ok_dist = pp.DIST.endswith(os.path.join("adb_tool.app", "Contents", "MacOS"))
+    check("mac 产物名为 device_bebugging_tool", pp.APP == "device_bebugging_tool",
+          pp.APP)
+    ok_dir = pp.APP_DIR.endswith(os.path.join("dist", "device_bebugging_tool.app"))
+    check("产物目录是 dist/device_bebugging_tool.app", ok_dir, pp.APP_DIR)
+    ok_dist = pp.DIST.endswith(
+        os.path.join("device_bebugging_tool.app", "Contents", "MacOS"))
     check("DIST 指向 Contents/MacOS", ok_dist, pp.DIST)
     ok_int = pp.INTERNAL.endswith(os.path.join("Contents", "MacOS", "_internal"))
     check("_internal 在 Contents/MacOS 下", ok_int, pp.INTERNAL)
@@ -166,7 +170,8 @@ def check_check_layout():
 
     import shutil
     import tempfile
-    app = os.path.join(tempfile.mkdtemp(prefix="_fake_bundle_"), "adb_tool.app")
+    app = os.path.join(tempfile.mkdtemp(prefix="_fake_bundle_"),
+                       "device_bebugging_tool.app")
     c = os.path.join(app, "Contents")
     try:
         os.makedirs(os.path.join(c, "MacOS"))
@@ -175,7 +180,7 @@ def check_check_layout():
         os.makedirs(os.path.join(c, "Resources", "web"))
         os.makedirs(os.path.join(c, "Resources", "config"))
 
-        with open(os.path.join(c, "MacOS", "adb_tool"), "wb") as f:
+        with open(os.path.join(c, "MacOS", "device_bebugging_tool"), "wb") as f:
             f.write(b"\xcf\xfa\xed\xfe")  # Mach-O magic
         for m in pp.MODULES:
             fn = os.path.join(c, "Frameworks", "core",

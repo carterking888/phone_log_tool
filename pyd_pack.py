@@ -13,6 +13,7 @@
 import glob
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -20,15 +21,16 @@ import time
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-APP = "adb_tool"
 PY = sys.executable
 
 # 平台差异：
 #   Windows  dist/adb_tool/adb_tool.exe            （onedir）
-#   macOS    dist/adb_tool.app/Contents/MacOS/...  （onedir + BUNDLE）
+#   macOS    dist/<APP_MAC>.app/Contents/MacOS/... （onedir + BUNDLE）
 # 扩展模块后缀也不同：.pyd vs .so
+# 产物名分平台：mac 包叫 device_bebugging_tool，Windows 仍是 adb_tool
 IS_MAC = sys.platform == "darwin"
 EXT = "so" if IS_MAC else "pyd"
+APP = "device_bebugging_tool" if IS_MAC else "adb_tool"
 APP_DIR = os.path.join(HERE, "dist", APP + ".app") if IS_MAC \
     else os.path.join(HERE, "dist", APP)
 DIST = os.path.join(APP_DIR, "Contents", "MacOS") if IS_MAC else APP_DIR
@@ -37,6 +39,20 @@ INTERNAL = os.path.join(DIST, "_internal")
 # 与 setup_pyd.py 的 TARGETS 保持一致（不含 __init__）
 MODULES = ("app", "api", "adb", "logcat", "labels", "demo", "action_log", "zhdict",
            "ios", "ioslog")
+
+
+def read_version():
+    """从 core/api.py 读 APP_VERSION（zip 命名用，与界面显示同源）。
+
+    不 import（core 可能处于 .py.src 暂避态或已编译成 .pyd），直接正则提取。
+    """
+    src = _core("api.py")
+    if os.path.isfile(src):
+        with open(src, encoding="utf-8") as f:
+            m = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', f.read())
+        if m:
+            return m.group(1)
+    return "0.0.0"
 
 
 def _core(name):
@@ -161,7 +177,7 @@ def make_zip():
         return None
     if IS_MAC:
         arch = (platform.machine() or "universal").lower()
-        name = "adb_tool_macos_%s.zip" % arch
+        name = "%s_v%s_macos_%s.zip" % (APP, read_version(), arch)
         dst = os.path.join(HERE, "dist", name)
         if os.path.exists(dst):
             os.remove(dst)
@@ -172,7 +188,7 @@ def make_zip():
             print("[zip] zip 命令失败（退出码 %d）" % r.returncode)
             return None
     else:
-        name = "adb_tool_pyd_win64.zip"
+        name = "%s_v%s_win64.zip" % ("device_bebugging_tool", read_version())
         dst = os.path.join(HERE, "dist", name)
         if os.path.exists(dst):
             os.remove(dst)
