@@ -1,5 +1,4 @@
 name: Build macOS App
-
 # 没有 mac 机器时的打包路径：PyInstaller 不能交叉编译，
 # 借 GitHub Actions 的 mac runner 产出真正的 .app。
 #
