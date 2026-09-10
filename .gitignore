@@ -11,10 +11,8 @@ core/*.c
 core/*.pyd
 core/*.so
 core/*.py.src
-
 # macOS 构建环境（build_mac.sh 自建）
 .venv_mac/
-
 # 诊断日志（ADB_TOOL_DIAG=1 时产生）
 *.log
 diag_verify_*.log
@@ -22,3 +20,4 @@ diag_verify_*.log
 *.sh
 !build_mac.sh
 *.ico
+/config/localhost.json

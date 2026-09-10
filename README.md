@@ -77,7 +77,7 @@ core/
   demo.py               演示数据（显式开启，不自动回退）
   labels.py / zhdict.py 应用名解析 / 中文词库懒加载
 config/                 权限中文（368 条）+ 包名中文（359 条）两个 JSON
-web/                    index.html + css + js/pages/*（四个页面组件）+ vendor 本地化依赖
+web/                    index.html + css + js + vendor 本地化依赖
 build_pyd.bat / adb_tool.spec / pyd_pack.py          Windows 打包
 build_mac.sh / .github/workflows/build-mac.yml       macOS 打包
 build_mac_win.bat       源码 zip / 触发云端构建
