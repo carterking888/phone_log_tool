@@ -226,8 +226,11 @@ def copy_helper_scripts():
 
 def run_pyinstaller():
     # 不要加 --clean：它会批量删除 bincache，被安全删除钩子拦截（exit 1 且无 traceback）
+    # spec 文件固定叫 adb_tool.spec：产物名由 spec 内部的 IS_MAC 分支决定
+    # （mac 上 APP 是 device_bebugging_tool，但不存在 device_bebugging_tool.spec，
+    #   按 APP 拼 spec 名会在 mac CI 上报 "Spec file not found"）
     cmd = [PY, "-m", "PyInstaller", "--noconfirm",
-           os.path.join(HERE, APP + ".spec")]
+           os.path.join(HERE, "adb_tool.spec")]
     print("[pack] " + " ".join(cmd[1:]))
     r = subprocess.run(cmd, cwd=HERE)
     return r.returncode

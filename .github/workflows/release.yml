@@ -32,6 +32,10 @@ permissions:
 
 env:
   BUILD_REF: main   # tag 触发时的构建源分支（push 触发用 github.sha）
+  # CI 的 Windows runner stdout 默认 cp1252：adb_tool.spec / pyd_pack.py 里的
+  # 中文 print 会 UnicodeEncodeError，强制 utf-8（对 mac/linux 无影响）
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: '1'
 
 jobs:
   macos:

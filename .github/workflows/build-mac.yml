@@ -54,6 +54,9 @@ jobs:
     env:
       # 构建源固定 main：手动跑也拿主干代码，不会因为选错分支打出旧包
       BUILD_REF: main
+      # 与 release.yml 同因：pyd_pack.py / adb_tool.spec 里有中文 print，统一 utf-8
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
 
     steps:
       - name: Checkout main
