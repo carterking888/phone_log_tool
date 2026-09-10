@@ -1,7 +1,6 @@
 name: Build macOS App
 # 没有 mac 机器时的打包路径：PyInstaller 不能交叉编译，
 # 借 GitHub Actions 的 mac runner 产出真正的 .app。
-#
 # 用法：Actions 页 -> Build macOS App -> Run workflow（可只选一种架构）
 #
 # 说明：**日常出包不用手动点**。master 合并进 main 后由 release.yml 自动打包并发
