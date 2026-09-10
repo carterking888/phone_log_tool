@@ -1,28 +1,37 @@
 name: Release
 
-# 打 tag 自动打包双平台产物并挂到 GitHub Release，文件名自带版本号。
+# 两种发版方式，产物都会自动挂到 GitHub Release（assets）：
 #
-# 发版流程（三步）：
-#   1. 把 core/api.py 的 APP_VERSION 改成发布版本（如 "2.7.1"），提交
-#   2. git tag v2.7.1 && git push origin v2.7.1
-#   3. 等 CI 跑完，Releases 页自动出现带产物的版本
-#      - device_bebugging_tool_v2.7.1_win64.zip        （Windows pyd 包，含 iOS 支持）
-#      - device_bebugging_tool_v2.7.1_macos_arm64.zip  （Apple Silicon）
-#      - device_bebugging_tool_v2.7.1_macos_x86_64.zip （Intel）
-# CI 会校验 tag 与 APP_VERSION 一致，不一致直接失败（防止版本错位）。
+#   A) 自动：master 合并进 main（push 到 main）后立刻出包并发「预发布」Release
+#      - tag    : v<APP_VERSION>-b<run 号>   例：v2.7.0-b42
+#      - 产物   : device_bebugging_tool_v2.7.0-b42_macos_arm64.zip
+#                 device_bebugging_tool_v2.7.0-b42_macos_x86_64.zip
+#                 device_bebugging_tool_v2.7.0-b42_win64.zip
+#      - 每次合并都会生成一个新 tag / Release，标记 pre-release，不影响正式版
 #
-# 构建源固定为 main 分支：无论 tag 打在哪个分支上，产物一律取 main 的代码，
-# 避免把还未合并进 main 的改动发布出去。
+#   B) 正式：手动打 tag（流程不变）
+#      1. 把 core/api.py 的 APP_VERSION 改成发布版本（如 "2.7.1"），提交并合进 main
+#      2. git tag v2.7.1 && git push origin v2.7.1
+#      - CI 会校验 tag 与 APP_VERSION 一致，不一致直接失败（防止版本错位）
+#      - 产物：device_bebugging_tool_v2.7.1_{win64,macos_arm64,macos_x86_64}.zip
+#
+# 构建源：push 触发打的就是本次合并的那个提交；tag 触发固定取 main（env.BUILD_REF）。
 
 on:
   push:
+    branches: [main]
     tags: ['v*']
+    # 只改文档不发版，省 runner 时长
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
 
 permissions:
   contents: write
 
 env:
-  BUILD_REF: main   # 改这里可切换发版构建源分支
+  BUILD_REF: main   # tag 触发时的构建源分支（push 触发用 github.sha）
 
 jobs:
   macos:
@@ -37,29 +46,34 @@ jobs:
             arch: x86_64
     runs-on: ${{ matrix.os }}
     steps:
-      # 发版代码源固定 main（tag 打在别的分支也不会带出未合并的改动）
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.BUILD_REF }}
+          # push -> 打刚合进来的提交；tag -> 取 main
+          ref: ${{ github.event_name == 'push' && github.sha || env.BUILD_REF }}
           fetch-depth: 0
 
       - name: Show build source
         run: |
-          echo "tag      : ${GITHUB_REF_NAME}"
-          echo "build ref: ${{ env.BUILD_REF }} -> $(git rev-parse --short HEAD)"
+          echo "event    : ${{ github.event_name }}"
+          echo "ref      : ${{ github.ref_name }}"
+          echo "commit   : $(git rev-parse --short HEAD)"
           echo "subject  : $(git log -1 --format=%s)"
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
 
-      - name: Version check（tag 必须等于 core/api.py 的 APP_VERSION）
+      - name: Version check（仅正式发版：tag 必须等于 APP_VERSION）
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
           APP_VER=$(grep -oE 'APP_VERSION *= *"[^"]+"' core/api.py | head -1 | cut -d'"' -f2)
-          echo "tag=v$TAG  APP_VERSION=$APP_VER"
-          [ "$TAG" = "$APP_VER" ] \
-            || { echo "[错误] tag v$TAG 与 APP_VERSION $APP_VER 不一致：改 APP_VERSION 后重新打 tag"; exit 1; }
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "自动构建：APP_VERSION=$APP_VER，tag 将为 v${APP_VER}-b${{ github.run_number }}"
+          else
+            TAG="${GITHUB_REF_NAME#v}"
+            echo "tag=v$TAG  APP_VERSION=$APP_VER"
+            [ "$TAG" = "$APP_VER" ] \
+              || { echo "[错误] tag v$TAG 与 APP_VERSION $APP_VER 不一致：改 APP_VERSION 后重新打 tag"; exit 1; }
+          fi
 
       - name: Build .app（WITH_IOS=1，内置 adb，zip 名自带版本号）
         run: |
@@ -69,51 +83,69 @@ jobs:
       - name: Smoke test（可执行文件存在且进程能活过初始化）
         run: |
           NAME="device_bebugging_tool"
-          VER="${GITHUB_REF_NAME#v}"
+          APP_VER=$(grep -oE 'APP_VERSION *= *"[^"]+"' core/api.py | head -1 | cut -d'"' -f2)
           EXE="dist/$NAME.app/Contents/MacOS/$NAME"
           test -x "$EXE" || { echo "[错误] 找不到 $EXE"; exit 1; }
-          test -f "dist/${NAME}_v${VER}_macos_${{ matrix.arch }}.zip" \
+          test -f "dist/${NAME}_v${APP_VER}_macos_${{ matrix.arch }}.zip" \
             || { echo "[错误] 分发 zip 未生成"; exit 1; }
           "$EXE" & PID=$!
           sleep 15
           kill -0 "$PID" 2>/dev/null && { echo "进程存活 15s -> OK"; kill "$PID" || true; } \
             || { echo "[错误] 进程 15s 内退出"; exit 1; }
 
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v2
+      # 自动构建（push）时给文件名加 -b<run 号>，避免不同 Release 里同名分不清
+      - name: Rename with build number
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          cd dist
+          for f in device_bebugging_tool_v*_macos_*.zip; do
+            [ -f "$f" ] || continue
+            mv "$f" "${f%.zip}-b${{ github.run_number }}.zip"
+            echo "renamed -> ${f%.zip}-b${{ github.run_number }}.zip"
+          done
+          ls -1
+
+      - uses: actions/upload-artifact@v4
         with:
-          files: dist/device_bebugging_tool_v*_macos_*.zip
+          name: pkg-macos-${{ matrix.arch }}
+          path: dist/device_bebugging_tool_*_macos_*.zip
+          if-no-files-found: error
+          retention-days: 14
 
   windows:
     runs-on: windows-latest
     env:
       WITH_IOS: '1'   # adb_tool.spec 读取：打进 pymobiledevice3（iOS 支持）
     steps:
-      # 发版代码源固定 main（tag 打在别的分支也不会带出未合并的改动）
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.BUILD_REF }}
+          ref: ${{ github.event_name == 'push' && github.sha || env.BUILD_REF }}
           fetch-depth: 0
 
       - name: Show build source
         shell: bash
         run: |
-          echo "tag      : ${GITHUB_REF_NAME}"
-          echo "build ref: ${{ env.BUILD_REF }} -> $(git rev-parse --short HEAD)"
+          echo "event    : ${{ github.event_name }}"
+          echo "ref      : ${{ github.ref_name }}"
+          echo "commit   : $(git rev-parse --short HEAD)"
           echo "subject  : $(git log -1 --format=%s)"
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
 
-      - name: Version check（tag 必须等于 core/api.py 的 APP_VERSION）
+      - name: Version check（仅正式发版：tag 必须等于 APP_VERSION）
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
           APP_VER=$(grep -oE 'APP_VERSION *= *"[^"]+"' core/api.py | head -1 | cut -d'"' -f2)
-          echo "tag=v$TAG  APP_VERSION=$APP_VER"
-          [ "$TAG" = "$APP_VER" ] \
-            || { echo "[错误] tag v$TAG 与 APP_VERSION $APP_VER 不一致：改 APP_VERSION 后重新打 tag"; exit 1; }
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "自动构建：APP_VERSION=$APP_VER，tag 将为 v${APP_VER}-b${{ github.run_number }}"
+          else
+            TAG="${GITHUB_REF_NAME#v}"
+            echo "tag=v$TAG  APP_VERSION=$APP_VER"
+            [ "$TAG" = "$APP_VER" ] \
+              || { echo "[错误] tag v$TAG 与 APP_VERSION $APP_VER 不一致：改 APP_VERSION 后重新打 tag"; exit 1; }
+          fi
 
       - name: Install dependencies
         run: |
@@ -129,8 +161,8 @@ jobs:
       - name: Smoke test（产物完整）
         shell: bash
         run: |
-          VER="${GITHUB_REF_NAME#v}"
-          test -f "dist/device_bebugging_tool_v${VER}_win64.zip" \
+          APP_VER=$(grep -oE 'APP_VERSION *= *"[^"]+"' core/api.py | head -1 | cut -d'"' -f2)
+          test -f "dist/device_bebugging_tool_v${APP_VER}_win64.zip" \
             || { echo "[错误] 分发 zip 未生成"; exit 1; }
           test -f "dist/adb_tool/adb_tool.exe" \
             || { echo "[错误] adb_tool.exe 未生成"; exit 1; }
@@ -138,7 +170,79 @@ jobs:
           echo "core pyd 数量: $N"
           [ "$N" -ge 10 ] || { echo "[错误] core pyd 少于 10 个"; exit 1; }
 
-      - name: Upload to Release
+      - name: Rename with build number
+        if: ${{ github.event_name == 'push' }}
+        shell: bash
+        run: |
+          cd dist
+          for f in device_bebugging_tool_v*_win64.zip; do
+            [ -f "$f" ] || continue
+            mv "$f" "${f%.zip}-b${{ github.run_number }}.zip"
+            echo "renamed -> ${f%.zip}-b${{ github.run_number }}.zip"
+          done
+          ls -1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-win64
+          path: dist/device_bebugging_tool_*_win64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  # 统一在最后一步建 Release + 挂 assets：避免 mac/win 两个 job 并发创建 Release 冲突
+  publish:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || env.BUILD_REF }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pkg-*
+          path: dist
+          merge-multiple: true
+
+      - name: Compute tag / version
+        id: meta
+        run: |
+          APP_VER=$(grep -oE 'APP_VERSION *= *"[^"]+"' core/api.py | head -1 | cut -d'"' -f2)
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="v${APP_VER}-b${{ github.run_number }}"
+            PRE=true
+            TITLE="device_bebugging_tool v${APP_VER} 自动构建 #${{ github.run_number }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            PRE=false
+            TITLE="device_bebugging_tool ${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          {
+            echo "## 产物"
+            echo ""
+            echo "| 平台 | 文件 |"
+            echo "|---|---|"
+            for f in dist/*.zip; do
+              echo "| $(basename "$f" | grep -q win64 && echo Windows || echo macOS) | \`$(basename "$f")\` |"
+            done
+            echo ""
+            echo "构建提交：\`$(git rev-parse --short HEAD)\` $(git log -1 --format=%s)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "tag=$TAG prerelease=$PRE"
+
+      - name: List assets
+        run: ls -lh dist
+
+      - name: Create Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/device_bebugging_tool_v*_win64.zip
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.title }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            dist/*.zip
