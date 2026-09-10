@@ -123,6 +123,8 @@ python _backend_check.py      # 后端自测（真机+演示模式双跑，按�
 python _mac_dryrun_check.py   # Windows 上模拟 darwin 预检 mac 打包分支
 python _render_check.py       # 真实窗口渲染冒烟（需桌面会话）
 ```
+## 下载安装包
+- **GitHub Releases：** https://github.com/carterking888/phone_log_tool/releases
 
 ## 平台差异速查
 
