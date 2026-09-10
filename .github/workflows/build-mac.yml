@@ -39,9 +39,23 @@ jobs:
             arch: x86_64
     runs-on: ${{ matrix.os }}
 
+    env:
+      # 构建源固定 main：手动跑也拿主干代码，不会因为选错分支打出旧包
+      BUILD_REF: main
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout main
         if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BUILD_REF }}
+          fetch-depth: 0
+
+      - name: Show build source
+        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
+        run: |
+          echo "build ref: ${{ env.BUILD_REF }} -> $(git rev-parse --short HEAD)"
+          echo "subject  : $(git log -1 --format=%s)"
 
       - name: Set up Python
         if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
