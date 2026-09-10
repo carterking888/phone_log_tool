@@ -2,11 +2,22 @@ name: Build macOS App
 # 没有 mac 机器时的打包路径：PyInstaller 不能交叉编译，
 # 借 GitHub Actions 的 mac runner 产出真正的 .app。
 #
-# 用法：Actions 页 -> Build macOS App -> Run workflow（可只选一种架构）
+# 两种触发方式：
+#   1) 自动：master 合并进 main（push 到 main）后立即打包，产物在 Actions -> 对应 run 底部下载
+#   2) 手动：Actions 页 -> Build macOS App -> Run workflow（可只选一种架构）
+#
 # 注意：matrix 上下文只能在 step 级 if 里引用（job 级 if 在 matrix
 # 展开前求值，引用 matrix 会报 Unrecognized named-value），所以
 # "单选架构"的跳过逻辑放在每个 step 的 if 上，而不是 job 的 if。
+# 每个 step 的条件同时兼容 push（无 inputs，全部执行）和手动（按 arch 过滤）两种触发。
 on:
+  push:
+    branches: [main]
+    # 只改文档不打包，省 runner 时长
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
   workflow_dispatch:
     inputs:
       arch:
@@ -45,49 +56,53 @@ jobs:
 
     steps:
       - name: Checkout main
-        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
+        if: ${{ github.event_name == 'push' || github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.BUILD_REF }}
+          # push 到 main：就打这次合并进来的那个提交，避免排队期间 main 又被推进导致"打的不是刚合的"
+          # 手动触发：取 main 最新
+          ref: ${{ github.event_name == 'push' && github.sha || env.BUILD_REF }}
           fetch-depth: 0
 
       - name: Show build source
-        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
+        if: ${{ github.event_name == 'push' || github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
         run: |
-          echo "build ref: ${{ env.BUILD_REF }} -> $(git rev-parse --short HEAD)"
+          echo "event    : ${{ github.event_name }}"
+          echo "build ref: ${{ github.event_name == 'push' && github.sha || env.BUILD_REF }} -> $(git rev-parse --short HEAD)"
           echo "subject  : $(git log -1 --format=%s)"
 
       - name: Set up Python
-        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
+        if: ${{ github.event_name == 'push' || github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
 
       - name: Show toolchain
-        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
+        if: ${{ github.event_name == 'push' || github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
         run: |
           sw_vers
           uname -m
           xcode-select -p
 
       - name: Build .app
-        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
+        if: ${{ github.event_name == 'push' || github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
         run: |
           chmod +x build_mac.sh
-          if [ "${{ github.event.inputs.with_ios }}" = "true" ]; then
+          # push 触发时 inputs 为空 -> 默认带 iOS（目标机无需任何 Python 环境）
+          if [ "${{ github.event.inputs.with_ios }}" != "false" ]; then
             export WITH_IOS=1
             echo "iOS 支持：启用（pymobiledevice3 将打进包，目标机无需任何 Python 环境）"
           else
             echo "iOS 支持：关闭（包体积更小，仅 Android）"
           fi
-          if [ "${{ github.event.inputs.dmg }}" = "true" ]; then
+          if [ "${{ github.event.inputs.dmg }}" != "false" ]; then
             ./build_mac.sh --dmg
           else
             ./build_mac.sh
           fi
 
       - name: Smoke test (app 能启动 + 内置 server 可达)
-        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
+        if: ${{ github.event_name == 'push' || github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
         run: |
           # .app 里的可执行文件在 Contents/MacOS（名字与 bundle 同名）
           NAME="device_bebugging_tool"
@@ -119,17 +134,20 @@ jobs:
           "$ADB_BIN" version | head -2
 
       - name: Upload artifacts
-        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
+        if: ${{ github.event_name == 'push' || github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch }}
         uses: actions/upload-artifact@v4
         with:
           name: device_bebugging_tool-macos-${{ matrix.arch }}
           path: dist/device_bebugging_tool_macos_*.zip
           if-no-files-found: error
+          retention-days: 14
 
       - name: Upload dmg
-        if: ${{ (github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch) && github.event.inputs.dmg == 'true' }}
+        # push 触发时 inputs 为空 -> 默认出 dmg；手动触发时按勾选决定
+        if: ${{ (github.event_name == 'push' || github.event.inputs.arch == 'both' || github.event.inputs.arch == matrix.arch) && github.event.inputs.dmg != 'false' }}
         uses: actions/upload-artifact@v4
         with:
           name: device_bebugging_tool-macos-${{ matrix.arch }}-dmg
           path: dist/device_bebugging_tool_macos_*.dmg
           if-no-files-found: error
+          retention-days: 14
