@@ -43,12 +43,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-14+ 是 Apple Silicon(arm64)；macos-13 是最后一档 Intel(x86_64)
+          # macos-14+ 是 Apple Silicon(arm64)；Intel(x86_64) 必须用 macos-15-intel
+          # ★ macos-13 已被 GitHub 于 2025-12-04 下线：label 没有匹配的 runner 时
+          #   不会报错，而是**排队到 24h 上限再自动取消**（表现为永远"等待中"，
+          #   publish 被一直卡住、tag/Release 都出不来）。
+          #   macos-15-intel 是官方现存的 x86_64 镜像，支持到约 2027-08。
           - os: macos-14
             arch: arm64
-          - os: macos-13
+          - os: macos-15-intel
             arch: x86_64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90   # 兜底：万一 label 失效也不会挂满 24h
     steps:
       - uses: actions/checkout@v4
         with:
@@ -124,6 +129,7 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    timeout-minutes: 90
     env:
       WITH_IOS: '1'   # adb_tool.spec 读取：打进 pymobiledevice3（iOS 支持）
     steps:
@@ -206,6 +212,10 @@ jobs:
   # 统一在最后一步建 Release + 挂 assets：避免 mac/win 两个 job 并发创建 Release 冲突
   publish:
     needs: [macos, windows]
+    # 任一平台失败/取消也要把"已经构建成功的那部分"发出去。
+    # 否则一个腿挂掉（如 runner 排队被取消）就连 tag/Release 都看不到，
+    # 完全不知道是没触发还是构建失败。
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -218,6 +228,14 @@ jobs:
           pattern: pkg-*
           path: dist
           merge-multiple: true
+
+      - name: Check downloaded assets
+        run: |
+          echo "下载到的产物："
+          ls -1 dist || true
+          N=$(ls -1 dist/*.zip 2>/dev/null | wc -l)
+          [ "$N" -gt 0 ] || { echo "[错误] 没有任何 zip 产物（所有平台都失败了），不建 Release"; exit 1; }
+          [ "$N" -ge 3 ] || echo "::warning::只拿到 $N 个产物（正常是 3 个），本次 Release 不完整"
 
       - name: Compute tag / version
         id: meta
