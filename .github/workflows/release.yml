@@ -64,10 +64,36 @@ jobs:
         with:
           ref: ${{ github.event_name == 'push' && github.sha || env.BUILD_REF }}
           fetch-depth: 0          # ci_version.sh 需要完整 tag 列表
+
+      # 预检：CI 依赖的文件必须真的在仓库里。
+      # 本项目已被 .gitignore 的通配规则坑过三次（*.bat 吃掉 fix_and_check.bat、
+      # *.ico 吃掉 config/icon.ico、*.sh 吃掉 ci_version.sh）—— 本地有、CI 上没有，
+      # 报错只有一句 "No such file or directory"，排查很费劲。这里直接指名道姓。
+      - name: Preflight（必需文件是否都在仓库里）
+        run: |
+          missing=""
+          for f in ci_version.sh build_mac.sh pyd_pack.py adb_tool.spec setup_pyd.py requirements.txt; do
+            [ -f "$f" ] || missing="$missing $f"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::以下文件在当前提交里不存在：$missing"
+            echo "通常是本地有、但被 .gitignore 排除所以没提交进仓库。"
+            echo "排查：git check-ignore -v <文件>"
+            echo "修复：在 .gitignore 里加一行 !<文件>，再 git add <文件> 提交。"
+            exit 1
+          fi
+          echo "必需文件就位：ci_version.sh build_mac.sh pyd_pack.py adb_tool.spec setup_pyd.py requirements.txt"
+
+      # ★ 所有地方都用 `tr -d '\r' < xx.sh | bash` 执行脚本，不要直接 `bash xx.sh`。
+      #   原因：GitHub 的 checkout 是 init + fetch + checkout 一气呵成，**同一批写出的
+      #   .gitattributes 来不及生效**（实测 Windows runner 上 ci_version.sh 仍是 CRLF），
+      #   而 Windows runner 默认 core.autocrlf=true。带着 \r 的脚本会报
+      #   `$'\r': command not found` 或直接 exit 127。
+      #   先剥 CR 再管道给 bash，就完全不依赖 runner 的 git 配置了（本地仍可 `bash ci_version.sh`）。
       - name: Resolve version（最新 tag 的 patch +1）
         id: v
         run: |
-          VER=$(bash ci_version.sh)
+          VER=$(tr -d '\r' < ci_version.sh | bash)
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
           echo "本次构建版本：v$VER"
           echo "### 本次版本 v$VER" >> "$GITHUB_STEP_SUMMARY"
@@ -110,7 +136,7 @@ jobs:
       # 把 version job 算好的版本号写进 core/api.py：
       # 应用内显示（appVersion）与产物 zip 名（build_mac.sh 读它）都从这里取
       - name: Set version
-        run: bash ci_version.sh "${{ needs.version.outputs.ver }}"
+        run: tr -d '\r' < ci_version.sh | bash -s -- "${{ needs.version.outputs.ver }}"
 
       - name: Build .app（WITH_IOS=1，内置 adb，zip 名自带版本号）
         run: |
@@ -168,9 +194,10 @@ jobs:
           python-version: '3.13'
 
       # 同 macos job：写入 version job 算出的版本号（Cython 编译前后必须是同一个值）
+      # Windows runner 的 CRLF 问题见 version job 上方说明，这里同样先 tr 掉 CR
       - name: Set version
         shell: bash
-        run: bash ci_version.sh "${{ needs.version.outputs.ver }}"
+        run: tr -d '\r' < ci_version.sh | bash -s -- "${{ needs.version.outputs.ver }}"
 
       - name: Install dependencies
         run: |
@@ -240,7 +267,7 @@ jobs:
           # 版本号由 version job 统一算出（最新 tag 的 patch +1；正式发版则等于 tag 本身）。
           # 每个版本只会出现一次，所以 tag 就是 v<版本号>，不再需要 -b<run 号> 后缀。
           VER="${{ needs.version.outputs.ver }}"
-          [ -n "$VER" ] || VER=$(bash ci_version.sh)
+          [ -n "$VER" ] || VER=$(tr -d '\r' < ci_version.sh | bash)
           TITLE="device_bebugging_tool v${VER}"
           TAG="v${VER}"
           if [ "${{ github.ref_type }}" = "tag" ]; then
