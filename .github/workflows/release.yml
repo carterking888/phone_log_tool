@@ -109,10 +109,16 @@ jobs:
           done
           ls -1
 
+      # 注意：上面的 Rename 会改文件名（末尾加 -b<run 号>），所以这里的 path
+      # 必须用能匹配"改名后"的通配式（曾写死 *_win64.zip → 改名后匹配不到 → 报
+      # "No files were found"，整个 Windows job 失败、Release 也建不出来）
+      - name: List dist
+        run: ls -lh dist
+
       - uses: actions/upload-artifact@v4
         with:
           name: pkg-macos-${{ matrix.arch }}
-          path: dist/device_bebugging_tool_*_macos_*.zip
+          path: dist/device_bebugging_tool_*.zip
           if-no-files-found: error
           retention-days: 14
 
@@ -186,10 +192,14 @@ jobs:
           done
           ls -1
 
+      - name: List dist
+        shell: bash
+        run: ls -lh dist
+
       - uses: actions/upload-artifact@v4
         with:
           name: pkg-win64
-          path: dist/device_bebugging_tool_*_win64.zip
+          path: dist/device_bebugging_tool_*.zip
           if-no-files-found: error
           retention-days: 14
 
