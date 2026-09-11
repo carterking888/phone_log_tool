@@ -310,9 +310,11 @@ def check():
         (ok if cl else errs).append(
             "ClrLoader.dll: %s" % ("OK" if cl else "MISSING"))
 
+        # fix_and_check.bat 跟源文件走：仓库根目录有就随包分发，没有只提示不算失败
+        # （它曾被 .gitignore 的 *.bat 排除 → CI 上没有 → 无谓地卡住整个打包流程）
         bat = os.path.join(APP_DIR, "fix_and_check.bat")
-        (ok if os.path.isfile(bat) else errs).append(
-            "fix_and_check.bat: %s" % ("OK" if os.path.isfile(bat) else "MISSING"))
+        ok.append("fix_and_check.bat: %s"
+                  % ("OK" if os.path.isfile(bat) else "未附带（可选）"))
 
     # 便携 adb 是可选增强：带了就校验，没带只提示（源目录不存在时不算失败）
     pad = glob.glob(os.path.join(APP_DIR, "public_settings", "adb", "adb.exe"))

@@ -3,22 +3,16 @@ name: Build macOS App
 # 借 GitHub Actions 的 mac runner 产出真正的 .app。
 # 用法：Actions 页 -> Build macOS App -> Run workflow（可只选一种架构）
 #
-# 说明：**日常出包不用手动点**。master 合并进 main 后由 release.yml 自动打包并发
-# Release（mac 双架构 + Windows 都在 Release 的 assets 里）。本工作流只用于
-#「只想单独打一个 mac 包、不想发 Release」的场景。
+# 说明：**日常出包不用手动点**。push 到 main 后由 release.yml 自动打包并发 Release
+#（mac 双架构 + Windows 都在 Release 的 assets 里）。本工作流只用于
+#「只想单独打一个 mac 包、不想发 Release」的场景 —— 只支持手动触发，
+# 不再挂在 push 上，否则每次 push main 会跟 release.yml 重复打一遍 mac（mac runner 按
+# 10 倍计费，很贵）。
 #
 # 注意：matrix 上下文只能在 step 级 if 里引用（job 级 if 在 matrix
 # 展开前求值，引用 matrix 会报 Unrecognized named-value），所以
 # "单选架构"的跳过逻辑放在每个 step 的 if 上，而不是 job 的 if。
-# 每个 step 的条件同时兼容 push（无 inputs，全部执行）和手动（按 arch 过滤）两种触发。
 on:
-  push:
-    branches: [main]
-    # 只改文档不打包，省 runner 时长
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.gitignore'
   workflow_dispatch:
     inputs:
       arch:

@@ -2,7 +2,7 @@ name: Release
 
 # 两种发版方式，产物都会自动挂到 GitHub Release（assets）：
 #
-#   A) 自动：master 合并进 main（push 到 main）后立刻出包并发「预发布」Release
+#   A) 自动：push 到 main 后立刻出包并发「预发布」Release（仓库现在只有 main 一个分支）
 #      - tag    : v<APP_VERSION>-b<run 号>   例：v2.7.0-b42
 #      - 产物   : device_bebugging_tool_v2.7.0-b42_macos_arm64.zip
 #                 device_bebugging_tool_v2.7.0-b42_macos_x86_64.zip

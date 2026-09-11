@@ -17,6 +17,8 @@ core/*.py.src
 *.log
 diag_verify_*.log
 *.bat
+# 目标机自检脚本：随分发包给同事，必须进仓库（CI 打包时也要带上）
+!fix_and_check.bat
 *.sh
 !build_mac.sh
 *.ico
