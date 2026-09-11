@@ -1,0 +1,12 @@
+# shell 脚本在仓库里统一存 LF，Windows 上检出也别转成 CRLF，
+# 否则 `./xx.sh`（走 shebang）会报 /usr/bin/env: 'bash\r': No such file or directory。
+#
+# ★ 注意：这条规则在 CI 里**不足以保证** LF。GitHub 的 checkout 是
+#   git init + fetch + checkout 一气呵成，同一批写出的 .gitattributes
+#   来不及对本批文件生效 —— 实测 Windows runner 上 ci_version.sh 仍被
+#   core.autocrlf=true 转成了 CRLF。
+#   所以 release.yml 里执行脚本一律写成 `tr -d '\r' < xx.sh | bash`：
+#   虽然 Git Bash / MSYS 系 bash 多数情况下能容忍 CRLF，但 Linux 上会报
+#   $'\r': command not found，各家 bash 构建行为也不一致，不值得赌。
+#   保留本文件是为了本地开发（Windows 检出）与 clone 类流程的行尾稳定。
+*.sh text eol=lf
