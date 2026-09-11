@@ -132,12 +132,25 @@ function makeStub(win) {
       labels: { "com.tencent.mm": "\u5fae\u4fe1", "com.ss.android.ugc.aweme": "\u6296\u97f3", "[qdss]": null, "spddaemon": null }
     }),
     pidof: (p) => ({ pid: p === "com.tencent.mm" ? 1234 : 2345 }),
-    list_packages: (s, kind) => ({
-      ok: true,
-      packages: PACKAGES.filter((p) => kind !== "system" || p[3] === "system")
-        .map((p) => ({ packageName: p[1], label: "", codePath: "/data/app/" + p[1] + "/base.apk",
-                       versionName: p[2], type: p[3], sizeBytes: p[4], running: p[5], pid: p[6] }))
-    }),
+    list_packages: (s, kind) => {
+      (win.__pkgCalls = win.__pkgCalls || []).push([s === undefined ? null : s, kind]);
+      // iOS 桩：设备只需一次 Any 查询，返回的字典自带 system/user 类型
+      if (s && String(s).indexOf("ios-") === 0) {
+        return {
+          ok: true,
+          packages: [
+            { packageName: "com.apple.Preferences", label: "设置", type: "system", versionName: "1.0", sizeBytes: 0, running: false, pid: 0 },
+            { packageName: "com.tencent.xin", label: "微信", type: "user", versionName: "8.0.49", sizeBytes: 0, running: false, pid: 0 }
+          ]
+        };
+      }
+      return {
+        ok: true,
+        packages: PACKAGES.filter((p) => kind !== "system" || p[3] === "system")
+          .map((p) => ({ packageName: p[1], label: "", codePath: "/data/app/" + p[1] + "/base.apk",
+                         versionName: p[2], type: p[3], sizeBytes: p[4], running: p[5], pid: p[6] }))
+      };
+    },
     get_label_status: () => ({ available: true, tool: "aapt2", kind: "aapt2", hint: "" }),
     resolve_labels: (items) => {
       const map = {};
@@ -330,6 +343,25 @@ function makeStub(win) {
   app().currentSerial = "ios-udid-1";
   await tick(400);
   check("iOS 设备时 isIos 为 true", app().isIos === true, String(app().isIos));
+  {
+    // 应用包列表（回归）：iOS 之前拆成 all/system/disabled 三次查询，每次都要新建
+    // lockdown 会话 + 现场统计每个应用的体积 → 慢到超时失败，列表永远刷新不了
+    win.__pkgCalls = [];
+    await app().apps.reload(app());
+    await tick(250);
+    check("iOS 列表只发起一次查询（不拆 all/system/disabled）",
+      win.__pkgCalls.length === 1, JSON.stringify(win.__pkgCalls));
+    check("iOS 查询走 application_type=Any（kind=all）",
+      win.__pkgCalls[0] && win.__pkgCalls[0][1] === "all", win.__pkgCalls[0] && win.__pkgCalls[0][1]);
+    check("iOS 查询显式带序列号（不依赖后端 current_serial）",
+      win.__pkgCalls[0] && win.__pkgCalls[0][0] === "ios-udid-1", win.__pkgCalls[0] && win.__pkgCalls[0][0]);
+    const iosTypes = app().apps.packages.map((p) => p.type).sort().join(",");
+    check("iOS 类型取自设备返回（system + third）", iosTypes === "system,third", iosTypes);
+    check("iOS 同步按钮显示加载态", /同步中…|\u540c\u6b65\u4e2d/.test(html));
+    check("iOS 列表无体积数据时不画 0 B 假条形",
+      app().apps.topApps.length === 0 && app().apps.totalSizeText === "—",
+      app().apps.totalSizeText);
+  }
   check("日志页出现 Cocos JS 卡片",
     ((q(".side") || {}).textContent || "").indexOf("Cocos JS 日志（USB）") >= 0);
   {
@@ -372,6 +404,21 @@ function makeStub(win) {
   app().currentSerial = savedIosSerial;
   app().devices.detail = savedIosDetail;
   await tick(300);
+  {
+    // 回到 Android：仍按 all/system/disabled 三种 kind 查询（分类靠 kind 反推），
+    // 并且要把被 iOS 桩数据覆盖过的列表刷回真实数据
+    win.__pkgCalls = [];
+    await app().apps.reload(app());
+    await tick(250);
+    const kinds = win.__pkgCalls.map((c) => c[1]).sort().join(",");
+    check("Android 仍按三种 kind 查询（all/disabled/system）",
+      kinds === "all,disabled,system", kinds);
+    check("Android 查询不带序列号（走后端 current_serial）",
+      win.__pkgCalls.length === 3 && win.__pkgCalls[0][0] === null,
+      JSON.stringify(win.__pkgCalls));
+    check("Android 有体积数据时展示 Top3", app().apps.topApps.length === 3,
+      app().apps.topApps.length);
+  }
 
   // 级别过滤（多选下拉）
   const mddBtns = qq(".toolbar .mdd__btn");

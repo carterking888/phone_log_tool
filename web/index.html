@@ -387,7 +387,7 @@
           <h2>已安装应用包</h2>
           <span class="muted">共检索到 {{ apps.packages.length }} 个应用 · 已同步自设备 {{ devices.detail ? devices.detail.model : '' }}</span>
           <div class="spacer"></div>
-          <button class="btn" @click="apps.reload(AdbApp)">同步包列表</button>
+          <button class="btn" :disabled="apps.loading" @click="apps.reload(AdbApp)">{{ apps.loading ? '同步中…' : '同步包列表' }}</button>
           <button class="btn btn--primary" @click="apps.openInstall(AdbApp)">安装 APK</button>
         </div>
 

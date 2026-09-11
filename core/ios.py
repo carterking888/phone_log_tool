@@ -402,8 +402,12 @@ class Ios:
         ld = await create_using_usbmux(serial=udid)
         async with ld:
             async with InstallationProxyService(ld) as ips:
+                # **不要开 calculate_sizes**：它会对每个应用额外发一次 lookup 让设备
+                # 现场统计 StaticDiskUsage/DynamicDiskUsage，应用一多就要几十秒到几分钟
+                # （列表页只显示包名/版本，根本用不到）。体积在详情页单独查（单包，
+                # 带 bundle_identifiers 只统计一个应用，很快）。
                 apps = await ips.get_apps(
-                    application_type=self._app_type(kind), calculate_sizes=True
+                    application_type=self._app_type(kind), calculate_sizes=False
                 )
         return [self._fmt_app(bid, info) for bid, info in (apps or {}).items()]
 

@@ -118,10 +118,14 @@ window.appsComponent = function () {
       return this.packages.filter(function (p) { return p.running; }).length;
     },
     get topApps() {
-      var arr = this.packages.slice().sort(function (a, b) {
-        return (b.sizeBytes || 0) - (a.sizeBytes || 0);
-      }).slice(0, 3);
-      var max = arr.length ? (arr[0].sizeBytes || 1) : 1;
+      // 只统计有体积数据的应用：列表接口不再为每个应用现算体积（太慢），
+      // 没数据时交给"暂无大小数据"空态，而不是画一排 0 B 的假条形
+      var arr = this.packages.filter(function (a) { return (a.sizeBytes || 0) > 0; })
+        .sort(function (a, b) {
+          return (b.sizeBytes || 0) - (a.sizeBytes || 0);
+        }).slice(0, 3);
+      if (!arr.length) return [];
+      var max = arr[0].sizeBytes || 1;
       return arr.map(function (a) {
         return {
           name: a.label || a.packageName,
@@ -238,19 +242,41 @@ window.appsComponent = function () {
       }
       this.loading = true;
       this.loadError = "";
-      return Promise.all([
-        Util.call("list_packages", null, "all"),
-        Util.call("list_packages", null, "system"),
-        Util.call("list_packages", null, "disabled")
-      ])
+      // iOS 的设备只查一次：InstallationProxy 每次 lookup 都要新建一个 lockdown
+      // 会话，而返回的字典里 application_type=Any 已经覆盖全部应用且自带 system/user
+      // 类型 —— 拆成 all/system/disabled 三次调用只是把等待时间翻三倍
+      // （之前"同步包列表"转很久最后还失败，列表就一直是旧的）。
+      var calls = app.isIos
+        ? [Util.call("list_packages", app.currentSerial, "all")]
+        : [
+          Util.call("list_packages", null, "all"),
+          Util.call("list_packages", null, "system"),
+          Util.call("list_packages", null, "disabled")
+        ];
+      return Promise.all(calls.map(function (p) {
+        // 单个 kind 失败不拖垮整次刷新：Promise.all 会直接 reject，
+        // 旧列表原样留在界面上，表现就是"点了同步没反应"
+        return p.then(function (r) { return r; }, function (e) {
+          self.loadError = (e && e.message) ? e.message : String(e);
+          return null;
+        });
+      }))
         .then(function (res) {
           var all = (res[0] && res[0].packages) || [];
+          // 一条都没拿到（设备掉线/未信任）：保留旧列表，报错由下面统一提示
+          if (!all.length && self.loadError) return;
           var sysSet = {};
-          ((res[1] && res[1].packages) || []).forEach(function (p) { sysSet[p.packageName] = 1; });
           var disSet = {};
-          ((res[2] && res[2].packages) || []).forEach(function (p) { disSet[p.packageName] = 1; });
+          if (!app.isIos) {
+            ((res[1] && res[1].packages) || []).forEach(function (p) { sysSet[p.packageName] = 1; });
+            ((res[2] && res[2].packages) || []).forEach(function (p) { disSet[p.packageName] = 1; });
+          }
           self.packages = all.map(function (p) {
-            var type = disSet[p.packageName] ? "disabled" : (sysSet[p.packageName] || p.type === "system" ? "system" : "third");
+            // iOS 非越狱拿不到"已禁用"状态，类型直接用设备返回的 system/user
+            var type = app.isIos
+              ? (p.type === "system" ? "system" : "third")
+              : (disSet[p.packageName] ? "disabled"
+                : (sysSet[p.packageName] || p.type === "system" ? "system" : "third"));
             return Util.enrichApp(Object.assign({}, p, { type: type }));
           });
           self.page = 1;
@@ -258,10 +284,10 @@ window.appsComponent = function () {
         })
         .catch(function (e) {
           self.loadError = e && e.message ? e.message : String(e);
-          app.toast("获取应用列表失败：" + self.loadError, "bad");
         })
         .then(function () {
           self.loading = false;
+          if (self.loadError) app.toast("获取应用列表失败：" + self.loadError, "bad");
           return self.loadLabels(app);
         });
     },
@@ -378,7 +404,8 @@ window.appsComponent = function () {
     doUninstall: function (app) {
       var self = this;
       if (!this.uninstallTarget) return;
-      return Util.call("uninstall", this.uninstallTarget, this.uninstallKeep)
+      // 显式带上序列号：后端 current_serial 可能与前端选中不一致（与安装同理）
+      return Util.call("uninstall", this.uninstallTarget, this.uninstallKeep, app.currentSerial)
         .then(function (r) {
           self.uninstallTask = { status: "running", percent: 0, phase: "准备中…", logs: [] };
           app.watchTask(r.taskId, function (t) {
