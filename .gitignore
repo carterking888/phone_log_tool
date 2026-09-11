@@ -21,5 +21,7 @@ diag_verify_*.log
 !fix_and_check.bat
 *.sh
 !build_mac.sh
+# CI 版本号解析脚本（release.yml 调用，必须进仓库）
+!ci_version.sh
 *.ico
 /config/localhost.json

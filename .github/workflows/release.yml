@@ -1,21 +1,25 @@
 name: Release
 
-# 两种发版方式，产物都会自动挂到 GitHub Release（assets）：
+# 版本号自动递增，不需要手改 core/api.py（规则与实现见仓库根目录 ci_version.sh）：
 #
-#   A) 自动：push 到 main 后立刻出包并发「预发布」Release（仓库现在只有 main 一个分支）
-#      - tag    : v<APP_VERSION>-b<run 号>   例：v2.7.0-b42
-#      - 产物   : device_bebugging_tool_v2.7.0-b42_macos_arm64.zip
-#                 device_bebugging_tool_v2.7.0-b42_macos_x86_64.zip
-#                 device_bebugging_tool_v2.7.0-b42_win64.zip
-#      - 每次合并都会生成一个新 tag / Release，标记 pre-release，不影响正式版
+#   每次 push 到 main -> 取最新 v* tag 的 patch +1   （v2.7.0 -> v2.7.1 -> v2.7.2 ...）
+#   应用内显示的版本 / 产物 zip 文件名 / GitHub tag / Release 标题 —— 全部用这一个版本。
+#   先由 version job 算一次，再把结果传给 mac / win / publish，保证同一次运行内一致。
 #
-#   B) 正式：手动打 tag（流程不变）
-#      1. 把 core/api.py 的 APP_VERSION 改成发布版本（如 "2.7.1"），提交并合进 main
-#      2. git tag v2.7.1 && git push origin v2.7.1
-#      - CI 会校验 tag 与 APP_VERSION 一致，不一致直接失败（防止版本错位）
-#      - 产物：device_bebugging_tool_v2.7.1_{win64,macos_arm64,macos_x86_64}.zip
+# 两种触发方式，产物都会自动挂到 GitHub Release（assets）：
 #
-# 构建源：push 触发打的就是本次合并的那个提交；tag 触发固定取 main（env.BUILD_REF）。
+#   A) 自动：push 到 main 后立刻出包并发「预发布」Release
+#      - tag    : v2.7.1
+#      - 产物   : device_bebugging_tool_v2.7.1_macos_arm64.zip
+#                 device_bebugging_tool_v2.7.1_macos_x86_64.zip
+#                 device_bebugging_tool_v2.7.1_win64.zip
+#
+#   B) 正式：手动打 tag（不递增，直接用 tag 本身）
+#      git tag v2.8.0 && git push origin v2.8.0
+#      - 之后自动递增会从 2.8.0 继续（下一个 push -> 2.8.1），不会版本回退
+#      - 产物：device_bebugging_tool_v2.8.0_{win64,macos_arm64,macos_x86_64}.zip
+#
+# 构建源：push 触发打的就是本次提交；tag 触发固定取 main（env.BUILD_REF）。
 
 on:
   push:
@@ -30,6 +34,16 @@ on:
 permissions:
   contents: write
 
+# 串行化：版本号是「读最新 tag +1」算出来的，若两次 push 的构建并发跑完，
+# 第二次会算出与第一次相同的版本 → 直接把上一个 Release 的 assets 覆盖掉。
+# 这里让新 push 取消还没跑完的旧运行：旧运行不会建 tag，所以版本号不会断号，
+# 也不会出现「同一个版本发两次」或两个 run 抢同一个 tag。
+# 想改成「排队等旧的跑完、每次 push 都出一个版本」，把 cancel-in-progress 改成 false。
+# group 带 ref：正式发版（tag 触发）与分支 push 不在同一队列，打 tag 不会被打断。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   BUILD_REF: main   # tag 触发时的构建源分支（push 触发用 github.sha）
   # CI 的 Windows runner stdout 默认 cp1252：adb_tool.spec / pyd_pack.py 里的
@@ -38,7 +52,28 @@ env:
   PYTHONUTF8: '1'
 
 jobs:
+  # 版本号只在这里算一次，其余 job 复用它。若让 mac/win/publish 各自去读 tag，
+  # 期间一旦有新 tag 产生，几个 job 就会算出不同版本，产物名和 tag 会对不上。
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      ver: ${{ steps.v.outputs.ver }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || env.BUILD_REF }}
+          fetch-depth: 0          # ci_version.sh 需要完整 tag 列表
+      - name: Resolve version（最新 tag 的 patch +1）
+        id: v
+        run: |
+          VER=$(bash ci_version.sh)
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "本次构建版本：v$VER"
+          echo "### 本次版本 v$VER" >> "$GITHUB_STEP_SUMMARY"
+
   macos:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -72,17 +107,10 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Version check（仅正式发版：tag 必须等于 APP_VERSION）
-        run: |
-          APP_VER=$(grep -oE 'APP_VERSION *= *"[^"]+"' core/api.py | head -1 | cut -d'"' -f2)
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "自动构建：APP_VERSION=$APP_VER，tag 将为 v${APP_VER}-b${{ github.run_number }}"
-          else
-            TAG="${GITHUB_REF_NAME#v}"
-            echo "tag=v$TAG  APP_VERSION=$APP_VER"
-            [ "$TAG" = "$APP_VER" ] \
-              || { echo "[错误] tag v$TAG 与 APP_VERSION $APP_VER 不一致：改 APP_VERSION 后重新打 tag"; exit 1; }
-          fi
+      # 把 version job 算好的版本号写进 core/api.py：
+      # 应用内显示（appVersion）与产物 zip 名（build_mac.sh 读它）都从这里取
+      - name: Set version
+        run: bash ci_version.sh "${{ needs.version.outputs.ver }}"
 
       - name: Build .app（WITH_IOS=1，内置 adb，zip 名自带版本号）
         run: |
@@ -102,21 +130,9 @@ jobs:
           kill -0 "$PID" 2>/dev/null && { echo "进程存活 15s -> OK"; kill "$PID" || true; } \
             || { echo "[错误] 进程 15s 内退出"; exit 1; }
 
-      # 自动构建（push）时给文件名加 -b<run 号>，避免不同 Release 里同名分不清
-      - name: Rename with build number
-        if: ${{ github.event_name == 'push' }}
-        run: |
-          cd dist
-          for f in device_bebugging_tool_v*_macos_*.zip; do
-            [ -f "$f" ] || continue
-            mv "$f" "${f%.zip}-b${{ github.run_number }}.zip"
-            echo "renamed -> ${f%.zip}-b${{ github.run_number }}.zip"
-          done
-          ls -1
-
-      # 注意：上面的 Rename 会改文件名（末尾加 -b<run 号>），所以这里的 path
-      # 必须用能匹配"改名后"的通配式（曾写死 *_win64.zip → 改名后匹配不到 → 报
-      # "No files were found"，整个 Windows job 失败、Release 也建不出来）
+      # 产物名自带版本号（device_bebugging_tool_v2.7.1_macos_arm64.zip），版本每次
+      # 递增已保证唯一，以前给文件名加 -b<run 号> 的改名步骤不再需要。
+      # path 仍用宽松通配 dist/device_bebugging_tool_*.zip（每个 job 的 dist 只含自己的产物）
       - name: List dist
         run: ls -lh dist
 
@@ -128,6 +144,7 @@ jobs:
           retention-days: 14
 
   windows:
+    needs: version
     runs-on: windows-latest
     timeout-minutes: 90
     env:
@@ -150,18 +167,10 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Version check（仅正式发版：tag 必须等于 APP_VERSION）
+      # 同 macos job：写入 version job 算出的版本号（Cython 编译前后必须是同一个值）
+      - name: Set version
         shell: bash
-        run: |
-          APP_VER=$(grep -oE 'APP_VERSION *= *"[^"]+"' core/api.py | head -1 | cut -d'"' -f2)
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "自动构建：APP_VERSION=$APP_VER，tag 将为 v${APP_VER}-b${{ github.run_number }}"
-          else
-            TAG="${GITHUB_REF_NAME#v}"
-            echo "tag=v$TAG  APP_VERSION=$APP_VER"
-            [ "$TAG" = "$APP_VER" ] \
-              || { echo "[错误] tag v$TAG 与 APP_VERSION $APP_VER 不一致：改 APP_VERSION 后重新打 tag"; exit 1; }
-          fi
+        run: bash ci_version.sh "${{ needs.version.outputs.ver }}"
 
       - name: Install dependencies
         run: |
@@ -186,18 +195,6 @@ jobs:
           echo "core pyd 数量: $N"
           [ "$N" -ge 10 ] || { echo "[错误] core pyd 少于 10 个"; exit 1; }
 
-      - name: Rename with build number
-        if: ${{ github.event_name == 'push' }}
-        shell: bash
-        run: |
-          cd dist
-          for f in device_bebugging_tool_v*_win64.zip; do
-            [ -f "$f" ] || continue
-            mv "$f" "${f%.zip}-b${{ github.run_number }}.zip"
-            echo "renamed -> ${f%.zip}-b${{ github.run_number }}.zip"
-          done
-          ls -1
-
       - name: List dist
         shell: bash
         run: ls -lh dist
@@ -211,7 +208,7 @@ jobs:
 
   # 统一在最后一步建 Release + 挂 assets：避免 mac/win 两个 job 并发创建 Release 冲突
   publish:
-    needs: [macos, windows]
+    needs: [version, macos, windows]
     # 任一平台失败/取消也要把"已经构建成功的那部分"发出去。
     # 否则一个腿挂掉（如 runner 排队被取消）就连 tag/Release 都看不到，
     # 完全不知道是没触发还是构建失败。
@@ -240,16 +237,16 @@ jobs:
       - name: Compute tag / version
         id: meta
         run: |
-          APP_VER=$(grep -oE 'APP_VERSION *= *"[^"]+"' core/api.py | head -1 | cut -d'"' -f2)
-          # Release 标题固定为「device_bebugging_tool v<APP_VERSION>」，不带"自动构建 #N"字样；
-          # tag 仍带 -b<run 号>（每次 push 必须唯一，否则同名 tag 会冲突/覆盖旧 Release）
-          TITLE="device_bebugging_tool v${APP_VER}"
-          if [ "${{ github.event_name }}" = "push" ]; then
-            TAG="v${APP_VER}-b${{ github.run_number }}"
-            PRE=true
-          else
-            TAG="${GITHUB_REF_NAME}"
+          # 版本号由 version job 统一算出（最新 tag 的 patch +1；正式发版则等于 tag 本身）。
+          # 每个版本只会出现一次，所以 tag 就是 v<版本号>，不再需要 -b<run 号> 后缀。
+          VER="${{ needs.version.outputs.ver }}"
+          [ -n "$VER" ] || VER=$(bash ci_version.sh)
+          TITLE="device_bebugging_tool v${VER}"
+          TAG="v${VER}"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
             PRE=false
+          else
+            PRE=true
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"

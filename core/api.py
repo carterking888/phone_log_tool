@@ -27,6 +27,9 @@ from . import demo, action_log
 from . import labels as labels_mod
 from . import zhdict
 
+# 版本号的唯一来源：应用内显示（appVersion）读它。
+# 自动发版时 CI 会在打包前用 ci_version.sh 把它改写成「最新 tag 的 patch +1」，
+# 所以平时不用手动改这里；仓库里的值只在「一个 tag 都没有」时作为递增基准兜底。
 APP_VERSION = "2.7.0"
 
 # iOS UDID 形态（40 位 hex / 24 位 hex / 8-16 分段）。platform 缓存没命中时用它兜底判定
