@@ -10,14 +10,15 @@ name: Release
 #
 #   A) 自动：push 到 main 后立刻出包并发「预发布」Release
 #      - tag    : v2.7.1
-#      - 产物   : device_bebugging_tool_v2.7.1_macos_arm64.zip
-#                 device_bebugging_tool_v2.7.1_macos_x86_64.zip
+#      - 产物   : device_bebugging_tool_v2.7.1_macos_arm64.zip / .dmg
+#                 device_bebugging_tool_v2.7.1_macos_x86_64.zip / .dmg
 #                 device_bebugging_tool_v2.7.1_win64.zip
+#      - zip = 解压即用；dmg = mac 安装镜像（点开拖进 Applications）
 #
 #   B) 正式：手动打 tag（不递增，直接用 tag 本身）
 #      git tag v2.8.0 && git push origin v2.8.0
 #      - 之后自动递增会从 2.8.0 继续（下一个 push -> 2.8.1），不会版本回退
-#      - 产物：device_bebugging_tool_v2.8.0_{win64,macos_arm64,macos_x86_64}.zip
+#      - 产物：device_bebugging_tool_v2.8.0_{win64.zip,macos_arm64.zip/.dmg,macos_x86_64.zip/.dmg}
 #
 # 构建源：push 触发打的就是本次提交；tag 触发固定取 main（env.BUILD_REF）。
 
@@ -138,10 +139,13 @@ jobs:
       - name: Set version
         run: tr -d '\r' < ci_version.sh | bash -s -- "${{ needs.version.outputs.ver }}"
 
-      - name: Build .app（WITH_IOS=1，内置 adb，zip 名自带版本号）
+      # --dmg：除 zip 外再出一个 dmg 安装镜像（点开拖进 Applications 即可，
+      #        比「解压 + 手动拖」友好，也是 mac 用户默认期待的格式）。
+      #        镜像在 ad-hoc 签名之后制作，镜像里的 .app 是已签名版本。
+      - name: Build .app + .dmg（WITH_IOS=1，内置 adb，文件名自带版本号）
         run: |
           chmod +x build_mac.sh
-          WITH_IOS=1 ./build_mac.sh
+          WITH_IOS=1 ./build_mac.sh --dmg
 
       - name: Smoke test（可执行文件存在且进程能活过初始化）
         run: |
@@ -149,23 +153,32 @@ jobs:
           APP_VER=$(grep -oE 'APP_VERSION *= *"[^"]+"' core/api.py | head -1 | cut -d'"' -f2)
           EXE="dist/$NAME.app/Contents/MacOS/$NAME"
           test -x "$EXE" || { echo "[错误] 找不到 $EXE"; exit 1; }
-          test -f "dist/${NAME}_v${APP_VER}_macos_${{ matrix.arch }}.zip" \
-            || { echo "[错误] 分发 zip 未生成"; exit 1; }
+          for ext in zip dmg; do
+            test -f "dist/${NAME}_v${APP_VER}_macos_${{ matrix.arch }}.${ext}" \
+              || { echo "[错误] 分发文件缺失：*_macos_${{ matrix.arch }}.${ext}"; exit 1; }
+          done
+          ls -lh "dist/${NAME}_v${APP_VER}_macos_${{ matrix.arch }}".*
+          # 内置 adb：目标机没装 Android SDK / brew 也要能连 Android 设备
+          ADB_BIN="dist/$NAME.app/Contents/MacOS/public_settings/adb/adb"
+          test -x "$ADB_BIN" || { echo "[错误] 内置 adb 缺失"; exit 1; }
+          "$ADB_BIN" version | head -2
           "$EXE" & PID=$!
           sleep 15
           kill -0 "$PID" 2>/dev/null && { echo "进程存活 15s -> OK"; kill "$PID" || true; } \
             || { echo "[错误] 进程 15s 内退出"; exit 1; }
 
-      # 产物名自带版本号（device_bebugging_tool_v2.7.1_macos_arm64.zip），版本每次
-      # 递增已保证唯一，以前给文件名加 -b<run 号> 的改名步骤不再需要。
-      # path 仍用宽松通配 dist/device_bebugging_tool_*.zip（每个 job 的 dist 只含自己的产物）
+      # 产物名自带版本号（device_bebugging_tool_v2.7.1_macos_arm64.zip/.dmg），版本
+      # 每次递增已保证唯一，以前给文件名加 -b<run 号> 的改名步骤不再需要。
+      # path 仍用宽松通配（每个 job 的 dist 只含自己的产物）；zip 与 dmg 都要传。
       - name: List dist
         run: ls -lh dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: pkg-macos-${{ matrix.arch }}
-          path: dist/device_bebugging_tool_*.zip
+          path: |
+            dist/device_bebugging_tool_*.zip
+            dist/device_bebugging_tool_*.dmg
           if-no-files-found: error
           retention-days: 14
 
@@ -210,7 +223,7 @@ jobs:
       - name: PyInstaller pack + zip（zip 名自带版本号）
         run: python pyd_pack.py
 
-      - name: Smoke test（产物完整）
+      - name: Smoke test（产物完整 + 内置 adb 可用）
         shell: bash
         run: |
           APP_VER=$(grep -oE 'APP_VERSION *= *"[^"]+"' core/api.py | head -1 | cut -d'"' -f2)
@@ -221,6 +234,15 @@ jobs:
           N=$(find dist/adb_tool -path "*core*.pyd" | wc -l)
           echo "core pyd 数量: $N"
           [ "$N" -ge 10 ] || { echo "[错误] core pyd 少于 10 个"; exit 1; }
+          # ★ 内置 adb：目标机装 Android SDK 的极少，缺了这台工具就是废的。
+          #   （曾因为源目录只在开发机存在，CI 上静默跳过 → 发出去的包全没有 adb）
+          ADB_BIN="dist/adb_tool/public_settings/adb/adb.exe"
+          test -f "$ADB_BIN" || { echo "[错误] 内置 adb 缺失：$ADB_BIN"; exit 1; }
+          for d in AdbWinApi.dll AdbWinUsbApi.dll; do
+            test -f "dist/adb_tool/public_settings/adb/$d" \
+              || { echo "[错误] 缺少 $d（adb 能启动但连不上设备）"; exit 1; }
+          done
+          "$ADB_BIN" version
 
       - name: List dist
         shell: bash
@@ -257,9 +279,9 @@ jobs:
         run: |
           echo "下载到的产物："
           ls -1 dist || true
-          N=$(ls -1 dist/*.zip 2>/dev/null | wc -l)
-          [ "$N" -gt 0 ] || { echo "[错误] 没有任何 zip 产物（所有平台都失败了），不建 Release"; exit 1; }
-          [ "$N" -ge 3 ] || echo "::warning::只拿到 $N 个产物（正常是 3 个），本次 Release 不完整"
+          N=$(ls -1 dist/*.zip dist/*.dmg 2>/dev/null | wc -l)
+          [ "$N" -gt 0 ] || { echo "[错误] 没有任何产物（所有平台都失败了），不建 Release"; exit 1; }
+          [ "$N" -ge 5 ] || echo "::warning::只拿到 $N 个产物（正常是 5 个：win64.zip + 双架构 mac 的 zip/dmg），本次 Release 不完整"
 
       - name: Compute tag / version
         id: meta
@@ -283,8 +305,14 @@ jobs:
             echo ""
             echo "| 平台 | 文件 |"
             echo "|---|---|"
-            for f in dist/*.zip; do
-              echo "| $(basename "$f" | grep -q win64 && echo Windows || echo macOS) | \`$(basename "$f")\` |"
+            for f in dist/*.zip dist/*.dmg; do
+              [ -f "$f" ] || continue
+              case "$(basename "$f")" in
+                *win64*) plat="Windows" ;;
+                *.dmg)   plat="macOS（安装镜像）" ;;
+                *)       plat="macOS（免安装 zip）" ;;
+              esac
+              echo "| $plat | \`$(basename "$f")\` |"
             done
             echo ""
             echo "构建提交：\`$(git rev-parse --short HEAD)\` $(git log -1 --format=%s)"
@@ -310,7 +338,19 @@ jobs:
             - 📄 日志查看：实时抓取 Android logcat、iOS syslog 设备日志
             - 📦 应用包管理：查看/安装/卸载应用，支持安卓 APK、iOS ipa 基础操作
             - 📂 文件管理：设备文件上传、下载、浏览
+
+            ### 下载哪个
+
+            | 系统 | 下载 | 说明 |
+            |---|---|---|
+            | Windows | `*_win64.zip` | 解压后双击 `adb_tool.exe`，已内置 adb，无需装 Android SDK |
+            | macOS | `*_macos_arm64.dmg`（M 系列）/ `*_macos_x86_64.dmg`（Intel） | 打开镜像拖进 Applications |
+            | macOS | 同架构 `*.zip` | 不想装，解压直接运行 |
+
+            > macOS 首次打开若提示「无法验证开发者」：右键 -> 打开（仅一次）。
+            > 芯片选错会提示「无法打开」，M 系列选 arm64。
           prerelease: ${{ steps.meta.outputs.prerelease }}
           generate_release_notes: true
           files: |
             dist/*.zip
+            dist/*.dmg

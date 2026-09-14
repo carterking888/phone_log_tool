@@ -105,8 +105,17 @@ echo "    dist/${NAME}_v${VER}_macos_${ARCH}.zip  ($(du -sh "$APP" | cut -f1) ->
 if [ "$MAKE_DMG" = "1" ]; then
     DMG="dist/${NAME}_v${VER}_macos_${ARCH}.dmg"
     rm -f "$DMG"
-    hdiutil create -volname "Device Debugging Tool" -srcfolder "$APP" -ov -format UDZO "$DMG" >/dev/null
-    echo "    $DMG"
+    # UDZO = 压缩只读镜像；-fs HFS+ 显式指定文件系统，兼容面比 APFS 更宽。
+    # -srcfolder 会连符号链接一起保留（.app 里 Frameworks 依赖软链，丢了体积暴涨且起不来）。
+    if ! hdiutil create -volname "Device Debugging Tool" -srcfolder "$APP" \
+            -ov -format UDZO -fs HFS+ "$DMG" >/dev/null; then
+        echo "[错误] dmg 生成失败（hdiutil 非 0 退出）" >&2
+        exit 1
+    fi
+    hdiutil verify "$DMG" >/dev/null 2>&1 \
+        && echo "    dmg 校验通过" \
+        || { echo "[错误] dmg 校验失败" >&2; exit 1; }
+    echo "    $DMG ($(du -h "$DMG" | cut -f1))"
 fi
 
 echo

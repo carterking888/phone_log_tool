@@ -94,32 +94,78 @@ def move_old_dist():
 
 # 便携 adb：与项目同层的 public_settings/adb（给没装 Android SDK 的电脑用）
 PORTABLE_SRC = os.path.join(os.path.dirname(HERE), "public_settings", "adb")
+# 本地没有时自动下载到这里（CI runner 上必然没有上一层目录，只能自己下）
+PORTABLE_CACHE = os.path.join(HERE, "build", "_portable_adb")
+PLATFORM_TOOLS_URL = ("https://dl.google.com/android/repository/"
+                      "platform-tools-latest-windows.zip")
+
+# 必须整目录带的文件：adb.exe 依赖同目录的 AdbWinApi.dll / AdbWinUsbApi.dll，
+# 只拷 exe 会"能启动但连不上设备"。aapt/aapt2 在 build-tools 里、platform-tools
+# 没有，本地目录里放了就一并带上（有它才能解析应用名，见 labels.find_aapt）。
+PORTABLE_KEEP = ("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll",
+                 "aapt2.exe", "aapt.exe")
 
 
-def copy_portable_adb():
-    """把便携 adb 整目录拷进产物，让目标机开箱即用。
+def resolve_portable_adb():
+    """确定内置 adb 的来源目录。返回 None = 跳过（mac / 显式跳过）。
 
-    - 必须整目录拷：adb.exe 依赖同目录的 AdbWinApi.dll / AdbWinUsbApi.dll，
-      只拷 exe 会"能启动但连不上设备"。
-    - mac 产物不能带 Windows 的 adb.exe，且 mac 用系统/brew 的 adb；跳过。
-    - SKIP_PORTABLE_ADB=1 可跳过。
+    ★ 这里曾经是「找不到源目录就静默跳过」，结果 **CI 打出的 Windows 包没有 adb**
+      （发布机是干净 runner，不存在 ../public_settings/adb），而 Release 才是主要
+      分发渠道 —— 用户拿到包根本连不上设备。现在缺了就联网下载，下载失败直接报错，
+      绝不产出「看起来正常、其实少了 adb」的包。
     """
-    if IS_MAC or os.environ.get("SKIP_PORTABLE_ADB") == "1":
+    if IS_MAC:
+        # mac 包不能带 Windows 的 adb.exe；mac 的 adb 由 build_mac.sh 单独内置
         return None
-    exe = os.path.join(PORTABLE_SRC, "adb.exe")
-    if not os.path.isfile(exe):
-        print("[portable] 未找到 %s，跳过（不影响打包）" % PORTABLE_SRC)
+    if os.environ.get("SKIP_PORTABLE_ADB") == "1":
+        print("[portable] SKIP_PORTABLE_ADB=1，跳过内置 adb")
         return None
-    # 只拷用得上的：sdk 自带目录里还有 fastboot/mke2fs/sqlite3 等一堆无关工具
+    if os.path.isfile(os.path.join(PORTABLE_SRC, "adb.exe")):
+        return PORTABLE_SRC
+    if os.path.isfile(os.path.join(PORTABLE_CACHE, "adb.exe")):
+        print("[portable] 使用已下载的 %s" % PORTABLE_CACHE)
+        return PORTABLE_CACHE
+
+    print("[portable] %s 不存在，从 Google 下载 platform-tools..." % PORTABLE_SRC)
+    # urllib.request 只在真的要下载时才导入（本文件其余部分用不到网络）：
+    # 它在 darwin 分支有一句裸 `from _scproxy import ...`，而
+    # _mac_dryrun_check.py 会在 Windows 上把 sys.platform 伪造成 'darwin'
+    # 再 import 本模块 —— 顶层导入会让那个离线预检直接 ModuleNotFoundError。
+    import urllib.request
+    os.makedirs(PORTABLE_CACHE, exist_ok=True)
+    zpath = os.path.join(PORTABLE_CACHE, "platform-tools.zip")
+    try:
+        urllib.request.urlretrieve(PLATFORM_TOOLS_URL, zpath)
+        with zipfile.ZipFile(zpath) as z:
+            for n in z.namelist():
+                base = os.path.basename(n)
+                if base in PORTABLE_KEEP:
+                    with z.open(n) as fsrc, \
+                            open(os.path.join(PORTABLE_CACHE, base), "wb") as fdst:
+                        shutil.copyfileobj(fsrc, fdst)
+        os.remove(zpath)
+    except Exception as e:  # noqa: BLE001
+        raise SystemExit(
+            "[错误] 内置 adb 下载失败：%s\n"
+            "       目标机没装 Android SDK 时，包里的 adb 是唯一可用的 adb。\n"
+            "       修复：联网重跑；或先手工把 platform-tools 的 adb.exe +\n"
+            "             AdbWinApi.dll + AdbWinUsbApi.dll 放到 %s；\n"
+            "       确实不要内置时：SKIP_PORTABLE_ADB=1" % (e, PORTABLE_SRC))
+    print("[portable] 下载完成 -> %s" % PORTABLE_CACHE)
+    return PORTABLE_CACHE
+
+
+def copy_portable_adb(src):
+    """把便携 adb 整目录拷进产物，让目标机开箱即用（src 由 resolve_portable_adb 给）。"""
+    if not src:
+        return None
+    # 只拷用得上的：platform-tools 里还有 fastboot/mke2fs/sqlite3 等无关工具
     # （合计 ~11MB，压缩后多占 4MB），丢掉后不影响 adb 任何功能。
-    # aapt 一并带上——有它才能解析应用名（见 labels.find_aapt）。
-    KEEP = ("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll",
-            "aapt2.exe", "aapt.exe")
     dst = os.path.join(APP_DIR, "public_settings", "adb")
     os.makedirs(dst, exist_ok=True)
-    names = [n for n in KEEP if os.path.isfile(os.path.join(PORTABLE_SRC, n))]
+    names = [n for n in PORTABLE_KEEP if os.path.isfile(os.path.join(src, n))]
     for n in names:
-        shutil.copy2(os.path.join(PORTABLE_SRC, n), os.path.join(dst, n))
+        shutil.copy2(os.path.join(src, n), os.path.join(dst, n))
     print("[portable] adb -> %s (%s)" % (dst, ", ".join(names)))
     return dst
 
@@ -316,15 +362,21 @@ def check():
         ok.append("fix_and_check.bat: %s"
                   % ("OK" if os.path.isfile(bat) else "未附带（可选）"))
 
-    # 便携 adb 是可选增强：带了就校验，没带只提示（源目录不存在时不算失败）
-    pad = glob.glob(os.path.join(APP_DIR, "public_settings", "adb", "adb.exe"))
-    if IS_MAC:
-        pass
-    elif pad:
-        dlls = glob.glob(os.path.join(APP_DIR, "public_settings", "adb", "*.dll"))
-        ok.append("便携 adb: OK (%d dll)" % len(dlls))
-    else:
-        ok.append("便携 adb: 未附带（可选）")
+    # 便携 adb：Windows 包缺了就等于没有 adb（目标机装 SDK 的极少），必须硬校验。
+    # 曾经这里写的是「未附带（可选）」→ 静默放过 → CI 发出的包全都没有 adb。
+    if not IS_MAC:
+        pad = os.path.join(APP_DIR, "public_settings", "adb")
+        dlls = glob.glob(os.path.join(pad, "*.dll"))
+        if not os.path.isfile(os.path.join(pad, "adb.exe")):
+            if os.environ.get("SKIP_PORTABLE_ADB") == "1":
+                ok.append("便携 adb: 未附带（SKIP_PORTABLE_ADB=1，目标机需自备 adb）")
+            else:
+                errs.append("便携 adb: MISSING（包内没有 adb.exe，目标机将无法使用）")
+        elif len(dlls) < 2:
+            errs.append("便携 adb: 只找到 %d 个 dll，缺 AdbWinApi/AdbWinUsbApi "
+                        "会让 adb 能启动但连不上设备" % len(dlls))
+        else:
+            ok.append("便携 adb: OK (%d dll)" % len(dlls))
 
     print("\n[check]")
     for line in ok:
@@ -367,6 +419,9 @@ def main():
         # 所以这里是「需要先重新编译」，不是异常。
         print("[错误] core 下没有 %s，请先跑 setup_pyd.py build_ext --inplace" % EXT)
         return 1
+    # 便携 adb 是必需项：目标机大概率没装 Android SDK，包里没有 adb 就完全不可用。
+    # 先在这里备好（可能要联网下载），别等 PyInstaller 跑完几分钟才发现拿不到。
+    portable_src = resolve_portable_adb()
     move_old_build()
     move_old_dist()
     moved = stash()
@@ -375,7 +430,7 @@ def main():
         if code != 0:
             print("[错误] PyInstaller 退出码 %d" % code)
             return code
-        copy_portable_adb()
+        copy_portable_adb(portable_src)
         copy_helper_scripts()
     finally:
         restore(moved)
