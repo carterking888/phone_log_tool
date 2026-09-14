@@ -25,9 +25,11 @@ except ModuleNotFoundError:
     )
     sys.exit(1)
 
-from core.api import Api, APP_VERSION  # noqa: E402
+from core.api import Api, DISPLAY_VERSION  # noqa: E402
 
-APP_TITLE = "ADB 日志与设备调试工具 v" + APP_VERSION
+# 窗口标题里的版本号与界面上显示的一致（源码运行 = 最近发布的 tag，
+# 打包态 = 构建时写进 core/api.py 的版本，见 core/api.py 的 DISPLAY_VERSION）。
+APP_TITLE = "ADB 日志与设备调试工具 v" + DISPLAY_VERSION
 
 
 def resource_path(rel):

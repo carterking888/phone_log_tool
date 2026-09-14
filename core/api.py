@@ -27,10 +27,39 @@ from . import demo, action_log
 from . import labels as labels_mod
 from . import zhdict
 
-# 版本号的唯一来源：应用内显示（appVersion）读它。
+# 版本号的唯一来源：应用内显示（appVersion）与窗口标题都从这里取。
 # 自动发版时 CI 会在打包前用 ci_version.sh 把它改写成「最新 tag 的 patch +1」，
 # 所以平时不用手动改这里；仓库里的值只在「一个 tag 都没有」时作为递增基准兜底。
 APP_VERSION = "2.7.0"
+
+
+def _repo_display_version():
+    """源码运行时（run.bat / python main.py）界面上显示的版本号。
+
+    仓库里的 APP_VERSION 只由 CI 在 runner 上改写、**不回写仓库**，所以本地会一直
+    停在旧值（2.7.0），跟 GitHub Release 上的包对不上。这里直接问 git 要「最近一次
+    发布的 tag」——本地 clone 里就有这个 tag，不用联网，也不写文件（不动工作区）。
+    取不到（没装 git / 不在仓库里 / 超时）就退回 APP_VERSION。
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        p = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*"],
+            cwd=root, capture_output=True, text=True, timeout=3,
+            creationflags=_no_window(),
+        )
+        tag = (p.stdout or "").strip()
+        if p.returncode == 0 and tag.startswith("v") and tag[1:2].isdigit():
+            return tag[1:]
+    except Exception:  # noqa: BLE001 - 版本号拿不到不该影响启动
+        pass
+    return APP_VERSION
+
+
+# 打包态（PyInstaller）直接用编译进去的 APP_VERSION：CI 打包前已写成本次构建版本，
+# 和 zip 名 / Release 同源，比去猜更准（包里也没有 .git 可问）。
+DISPLAY_VERSION = (APP_VERSION if getattr(sys, "frozen", False)
+                   else _repo_display_version())
 
 # iOS UDID 形态（40 位 hex / 24 位 hex / 8-16 分段）。platform 缓存没命中时用它兜底判定
 UDID_RE = re.compile(r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{16}|[0-9a-fA-F]{40}|[0-9a-fA-F]{24})$")
@@ -122,7 +151,9 @@ class Api:
         # 扫描失败后导致整个 window.pywebview.api 为空。
         self._window = None  # core/app.py 注入
         self.env = {
-            "appVersion": APP_VERSION,
+            # 显示用版本号：源码运行取最近发布的 tag，打包态取编译进来的值（见上方
+            # DISPLAY_VERSION 注释）。界面上看到的版本号永远等于最新发布的包。
+            "appVersion": DISPLAY_VERSION,
             "adbPath": self.adb.path,
             "adbVersion": "",
             "adbFound": False,

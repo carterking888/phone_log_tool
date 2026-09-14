@@ -59,6 +59,58 @@ def _core(name):
     return os.path.join(HERE, "core", name)
 
 
+def latest_tag_version():
+    """最近一次发布的 tag 对应的版本号（去掉前缀 v），取不到返回 None。"""
+    try:
+        p = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*"],
+            cwd=HERE, capture_output=True, text=True, timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if p.returncode != 0:
+            return None
+        tag = (p.stdout or "").strip()
+        return tag[1:] if tag.startswith("v") else None
+    except Exception:  # noqa: BLE001 - 没装 git / 不在仓库里：当作没有 tag
+        return None
+
+
+def _ver_tuple(v):
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)", v or "")
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def sync_version_from_tag(api_py=None):
+    """把 core/api.py 的 APP_VERSION 对齐「最近发布的 tag」，返回 (旧值, 新值) 或 None。
+
+    为什么需要：打包态界面显示的版本号是**编译进去**的 APP_VERSION，而仓库里的值只由
+    CI 在 runner 上改写（不回写仓库），本地会一直停在旧值 —— 本地打出来的包写着 2.7.0，
+    GitHub 上的包却是 2.7.2，两边对不上。由 setup_pyd.py 在 Cython 编译**之前**调用
+    （版本号必须在那之前定下来），本地打包就自动跟上最新发布版。
+
+    只升不降：CI 打包前 ci_version.sh 已写入「最新 tag + 1」，比任何现存 tag 都新，
+    所以 CI 上这次调用是 no-op，绝不会把版本号改小。
+    """
+    path = api_py or _core("api.py")
+    if not os.path.isfile(path):
+        return None
+    tag = latest_tag_version()
+    if not tag:
+        return None
+    # newline=""：原样读写，不改动行尾（LF 还是 LF，CRLF 还是 CRLF）
+    with open(path, encoding="utf-8", newline="") as f:
+        src = f.read()
+    m = re.search(r'^APP_VERSION[ \t]*=[ \t]*"([^"]+)"', src, re.M)
+    if not m:
+        return None
+    old = m.group(1)
+    new_t, old_t = _ver_tuple(tag), _ver_tuple(old)
+    if new_t is None or old_t is None or new_t <= old_t:
+        return None
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(src[:m.start(1)] + tag + src[m.end(1):])
+    return (old, tag)
+
+
 def stash():
     moved = []
     for m in MODULES:

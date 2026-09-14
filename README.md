@@ -66,17 +66,26 @@ python main.py            # 或双击 run.bat
   `xattr -cr device_bebugging_tool.app`。
 - iOS 支持需在打包时以 `WITH_IOS=1`（脚本会询问）装入 pymobiledevice3，产物内嵌运行时，目标机免 Python 环境。
 
-### 发版（打 tag 自动出双平台包）
+### 发版（push main 或打 tag 自动出双平台包）
 
-分发 zip 名称自带版本号（取自 `core/api.py` 的 `APP_VERSION`），如
-`device_bebugging_tool_v2.7.0_win64.zip` / `device_bebugging_tool_v2.7.0_macos_arm64.zip`。
+版本号自动递增，**不用手改** `core/api.py`：push main 时取最新 `v*` tag 的 patch +1
+（v2.7.0 → v2.7.1），手动打 tag 则直接用 tag 本身。窗口标题 / 界面显示的版本 /
+产物名 / tag / Release 标题全部同源。
 
 ```bash
-# 1. 确认 core/api.py 的 APP_VERSION 已改为发布版本并提交
-git tag v2.7.0 && git push origin v2.7.0
-# 2. 等 Release workflow 跑完，产物自动挂到 GitHub Releases
-#    （CI 校验 tag 与 APP_VERSION 一致，不一致会失败）
+# 日常：改动 push 到 main，自动算版本、出双平台包并挂到 GitHub Releases
+git push origin main
+
+# 正式发版：手动打 tag（不递增，直接用 tag 本身）
+git tag v2.8.0 && git push origin v2.8.0
 ```
+
+产物：`device_bebugging_tool_v<版本>_win64.zip`、`..._macos_arm64.zip|.dmg`、
+`..._macos_x86_64.zip|.dmg`（Windows 包与 mac 包都已内置 adb，目标机免装 Android SDK）。
+
+> 源码运行（`run.bat`）时显示的版本号取「最近一次发布的 tag」，所以本地看到的版本号
+> 与 GitHub 上的包一致；本地打包时 `setup_pyd.py` 会把这个 tag 写进 `core/api.py`
+> （只升不降，CI 里是 no-op），本地产出的包也跟上。
 
 ## 目录结构
 
