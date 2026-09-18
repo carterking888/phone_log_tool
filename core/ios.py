@@ -296,7 +296,19 @@ class Ios:
             mux = await usbmux.list_devices()
         except Exception as e:  # noqa: BLE001
             raise _wrap(e)
+        # 同一台设备会被 usbmux 列出多条：USB 与 Network 各一条，个别 Apple
+        # 驱动还会把同一个 USB 连接重复枚举。不去重的话设备列表里就会出现两张
+        # 一模一样的卡片，顶栏台数也跟着虚高。按 serial 去重、USB 优先。
+        picked = {}
         for d in mux:
+            prev = picked.get(d.serial)
+            if prev is None:
+                picked[d.serial] = d
+                continue
+            if ((d.connection_type or "").upper() == "USB"
+                    and (prev.connection_type or "").upper() != "USB"):
+                picked[d.serial] = d
+        for d in picked.values():
             item = {
                 "serial": d.serial,
                 "state": "device",
@@ -494,12 +506,34 @@ class Ios:
         from pymobiledevice3.lockdown import create_using_usbmux
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
+        def _extract(obj):
+            """installd 的 handler 回传 plist dict，形如
+                {'PercentComplete': 30, 'Status': 'CopyingFile'}
+            个别版本/路径直接给 int 百分比。两种都认，返回 (百分比|None, 状态串)。
+            """
+            if isinstance(obj, bool):
+                return None, ""
+            if isinstance(obj, int):
+                return obj, ""
+            if isinstance(obj, dict):
+                pct = obj.get("PercentComplete", obj.get("percentComplete"))
+                status = obj.get("Status") or obj.get("status") or ""
+                return (_norm_int(pct, None) if pct is not None else None), _as_text(status)
+            return None, ""
+
         def _cb(percent=None, *args, **kwargs):  # pymobiledevice3 的 handler 签名多变
-            if on_progress:
-                try:
-                    on_progress(percent if isinstance(percent, int) else None, args, kwargs)
-                except Exception:  # noqa: BLE001
-                    pass
+            if not on_progress:
+                return
+            pct, status = _extract(percent)
+            if pct is None and not status:  # 百分比可能被塞在后面的位置/关键字参数里
+                for extra in list(args) + list(kwargs.values()):
+                    pct, status = _extract(extra)
+                    if pct is not None or status:
+                        break
+            try:
+                on_progress(pct, status)
+            except Exception:  # noqa: BLE001
+                pass
 
         ld = await create_using_usbmux(serial=udid)
         async with ld:

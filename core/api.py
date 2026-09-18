@@ -787,6 +787,23 @@ class Api:
                          args=(t, serial, path, options), daemon=True).start()
         return {"taskId": tid}
 
+    # installd 回传的 Status -> 中文阶段。ipa 安装本身就慢（上传 staging +
+    # 设备端解包/验签/安装），必须把阶段显示出来，否则看着像卡死在 0%。
+    IOS_INSTALL_PHASES = {
+        "CreatingStagingDirectory": "创建暂存目录…",
+        "CopyingFile": "正在上传到设备…",
+        "ExtractingPackage": "设备端解包…",
+        "InspectingPackage": "检查包内容…",
+        "PreflightingApplication": "预检应用…",
+        "VerifyingApplication": "校验签名…",
+        "CreatingContainer": "创建应用容器…",
+        "InstallingApplication": "安装到设备…",
+        "PostflightingApplication": "安装收尾…",
+        "SandboxingApplication": "配置沙盒…",
+        "GeneratingApplicationMap": "生成应用映射…",
+        "Complete": "安装完成",
+    }
+
     def _install_ios_worker(self, t, serial, path):
         guard = self._ios_guard()
         if guard:
@@ -797,12 +814,18 @@ class Api:
         t.phase = "正在安装 ipa…"
         t.log("ios install %s" % path)
         try:
-            last_pct = [0]
+            last = {"pct": -1, "status": ""}
 
-            def _cb(pct, *_args, **_kwargs):
-                if isinstance(pct, int) and pct != last_pct[0]:
-                    last_pct[0] = pct
+            def _cb(pct=None, status="", *_args, **_kwargs):
+                if isinstance(pct, int) and pct != last["pct"]:
+                    last["pct"] = pct
                     t.percent = max(1, min(99, pct))
+                s = str(status or "")
+                if s and s != last["status"]:
+                    last["status"] = s
+                    t.phase = self.IOS_INSTALL_PHASES.get(s, "正在安装 ipa…（%s）" % s)
+                    t.log("installd: %s%s" % (
+                        s, ("  %d%%" % pct) if isinstance(pct, int) else ""))
 
             self.ios.install(serial, path, on_progress=_cb)
             action_log.record("install", "ios install %s" % path, serial=serial, ok=True,
@@ -825,6 +848,51 @@ class Api:
             if options.get(k):
                 flags.append("-" + k)
         return flags
+
+    @staticmethod
+    def _merge_out(r):
+        """stdout + stderr 合并。
+
+        adb/pm 把进度行（Performing Streamed Install）和失败详情
+        （Failure [INSTALL_FAILED_*] / adb: error: ...）都写 stderr，
+        用 `stdout or stderr` 会在 stdout 非空时把真正的错误整个丢掉。
+        """
+        parts = [(r.get("stdout") or "").strip(), (r.get("stderr") or "").strip()]
+        return "\n".join(p for p in parts if p)
+
+    @staticmethod
+    def _install_verdict(r, output):
+        """以输出里**最后**一个结论为准，拿不到结论才退回 returncode。
+
+        adb 增量安装失败会自动回退流式安装，输出形如
+            Performing Incremental Install / Failure / Performing Streamed Install / Success
+        中间那个 Failure 是正常的，只要见 Failure 就判失败会误报。
+        """
+        verdict = None
+        for line in output.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            if s.startswith("Success"):
+                verdict = True
+            elif (s.startswith("Failure") or "INSTALL_FAILED" in s
+                  or "INSTALL_PARSE_FAILED" in s or s.lower().startswith("adb: error")
+                  or s.lower().startswith("adb: failed")):
+                verdict = False
+        if verdict is None:
+            return bool(r["ok"])
+        return verdict
+
+    @staticmethod
+    def _install_error(output):
+        """从输出里挑出真正有用的那一行，别把进度行当错误展示。"""
+        keys = ("INSTALL_FAILED", "INSTALL_PARSE_FAILED", "Failure",
+                "adb: error", "adb: failed")
+        for line in reversed(output.splitlines()):
+            s = line.strip()
+            if s and any(k in s for k in keys):
+                return s
+        return output.strip() or "安装失败（命令无输出）"
 
     def _install_worker(self, t, serial, path, options):
         ext = os.path.splitext(path)[1].lower()
@@ -902,20 +970,25 @@ class Api:
             return
         t.percent = 92
         t.phase = "正在安装到设备…"
-        t.log("adb install %s %s" % (" ".join(flags), remote))
-        r = self.adb.run(["install"] + flags + [remote], serial=serial, timeout=300)
-        output = (r["stdout"] or r["stderr"]).strip()
+        # 文件已经 push 到设备上了，所以必须走 `shell pm install <设备路径>`。
+        # 写成 `adb install <设备路径>` 是错的：adb install 的参数是**电脑本地路径**，
+        # 它会去 PC 上找 /data/local/tmp/xxx.apk，必然 cannot stat。
+        t.log("adb -s %s shell pm install %s %s" % (serial, " ".join(flags), remote))
+        r = self.adb.run(["shell", "pm", "install"] + flags + [remote],
+                         serial=serial, timeout=300)
+        output = self._merge_out(r)
         t.log(output.replace("\n", " | "))
+        ok = self._install_verdict(r, output)
         action_log.record("install", r["cmd"], serial=serial, exit_code=r["exitCode"],
-                          output=output, ok=r["ok"])
+                          output=output, ok=ok)
         try:
             self.adb.shell("rm %s" % remote, serial=serial, timeout=15)
         except Exception:
             pass
         t.percent = 100
-        t.phase = "安装完成" if r["ok"] else "安装失败"
-        t.status = "success" if r["ok"] else "failed"
-        t.error = "" if r["ok"] else output
+        t.phase = "安装完成" if ok else "安装失败"
+        t.status = "success" if ok else "failed"
+        t.error = "" if ok else self._install_error(output)
         t.result = {"output": output}
 
     # ---------------------------------------------- .xapk / .apks 会话安装
@@ -1035,15 +1108,16 @@ class Api:
             t.percent = 92
             t.phase = "正在提交安装…"
             cr = self.adb.run(["shell", "pm", "install-commit", session], serial=serial, timeout=600)
-            output = (cr["stdout"] or cr["stderr"]).strip()
+            output = self._merge_out(cr)
             t.log(output.replace("\n", " | ")[:200])
+            ok = self._install_verdict(cr, output)
             action_log.record("install", cr["cmd"], serial=serial, exit_code=cr["exitCode"],
-                              output=output, ok=cr["ok"])
+                              output=output, ok=ok)
             self.adb.shell("rm -rf %s" % remote_dir, serial=serial, timeout=30)
             t.percent = 100
-            t.phase = "安装完成" if cr["ok"] else "安装失败"
-            t.status = "success" if cr["ok"] else "failed"
-            t.error = "" if cr["ok"] else output
+            t.phase = "安装完成" if ok else "安装失败"
+            t.status = "success" if ok else "failed"
+            t.error = "" if ok else self._install_error(output)
             t.result = {"output": output}
         finally:
             try:

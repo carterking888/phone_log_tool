@@ -62,6 +62,19 @@ def find_free_port():
 # ---------------------------------------------------------------------------
 DROP_EXTS = (".apk", ".xapk", ".apks", ".ipa")
 
+# 诊断用：拖放日志同时落盘，避免被 pywebview/pythonnet 的控制台噪音刷掉。
+DROP_LOG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "drop_hook.log")
+
+
+def _dlog(msg):
+    print(msg)
+    try:
+        with open(DROP_LOG, "a", encoding="utf-8") as f:
+            f.write("%s %s\n" % (time.strftime("%H:%M:%S"), msg))
+    except Exception:  # noqa: BLE001
+        pass
+
 
 def _file_uri_to_path(uri):
     try:
@@ -98,24 +111,70 @@ def install_drop_hook(window):
             raise box["error"]
         return box.get("value")
 
-    def _push(uri):
-        path = _file_uri_to_path(uri)
+    def _push_path(path):
+        """真实磁盘路径 -> 前端。WinForms DragDrop 与 URI 拦截两条路共用。"""
         if not path:
             return
         ext = os.path.splitext(path)[1].lower()
         if ext in DROP_EXTS:
+            _dlog("[drop-hook] 命中白名单 ext=%s -> onNativeDrop(%s)" % (ext, path))
             window.evaluate_js("AdbApp && AdbApp.onNativeDrop(%s)" % json.dumps(path))
         else:
+            _dlog("[drop-hook] 不在白名单 ext=%s -> onNativeDropRejected" % ext)
             window.evaluate_js(
                 "AdbApp && AdbApp.onNativeDropRejected(%s)" % json.dumps(os.path.basename(path)))
 
-    def _on_file_drop(args_get_uri, cancel):
+    def _push(uri):
+        path = _file_uri_to_path(uri)
+        if not path:
+            _dlog("[drop-hook] uri 解析出空路径，丢弃: %s" % uri[:120])
+            return
+        _push_path(path)
+
+    # ------------------- pywebview DOM 拖放（5.2+ 注入 pywebviewFullPath）
+    def _on_drag(e):
+        # 空实现即可：DOMEventHandler(prevent_default=True) 会在 JS 侧
+        # preventDefault，光标才会变成"可放置"而不是禁止图标。
+        pass
+
+    def _on_drop(e):
+        # 官方文档对这个字段有两种写法（domTransfer / dataTransfer），都兜住
+        tr = e.get("domTransfer") or e.get("dataTransfer") or {}
+        files = tr.get("files") or []
+        if not files:
+            _dlog("[drop-hook][dom] drop 事件里没有文件")
+            return
+        for f in files:
+            p = f.get("pywebviewFullPath") or ""
+            if not p:
+                _dlog("[drop-hook][dom][WARN] 缺 pywebviewFullPath，只有 name=%s"
+                      % f.get("name"))
+                continue
+            _dlog("[drop-hook][dom] 收到 %s" % p)
+            _push_path(os.path.normpath(p))
+
+    def _bind_dom():
+        try:
+            from webview.dom import DOMEventHandler
+
+            ev = window.dom.document.events
+            ev.dragenter += DOMEventHandler(_on_drag, True, True)
+            ev.dragover += DOMEventHandler(_on_drag, True, True, debounce=300)
+            ev.drop += DOMEventHandler(_on_drop, True, True)
+            _dlog("[drop-hook] DOM 拖放已挂接（dragenter/dragover/drop）")
+        except Exception as e:  # noqa: BLE001 - 挂接失败只影响拖放
+            _dlog("[drop-hook][WARN] DOM 拖放挂接失败: %r" % e)
+
+    def _on_file_drop(source, args_get_uri, cancel):
         try:
             uri = args_get_uri()
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            _dlog("[drop-hook][%s] 取 Uri 失败: %r" % (source, e))
             return
         if not uri.startswith("file:"):
+            _dlog("[drop-hook][%s] 非 file 协议，放行: %s" % (source, uri[:80]))
             return
+        _dlog("[drop-hook][%s] 截获 %s" % (source, uri))
         cancel()
         _push(uri)
 
@@ -128,10 +187,12 @@ def install_drop_hook(window):
                 return False
 
             def on_nav(_sender, args):
-                _on_file_drop(lambda: str(args.Uri), lambda: setattr(args, "Cancel", True))
+                _on_file_drop(
+                    "nav", lambda: str(args.Uri), lambda: setattr(args, "Cancel", True))
 
             def on_download(_sender, args):
                 _on_file_drop(
+                    "download",
                     lambda: str(args.DownloadOperation.Uri),
                     lambda: setattr(args, "Cancel", True))
 
@@ -141,7 +202,21 @@ def install_drop_hook(window):
                 core.DownloadStarting += on_download
             except Exception as e:  # noqa: BLE001 - 老WebView2运行时缺该事件：.apk/.ipa拖入会弹下载/打开方式提示
                 dl_ok = False
-                print("[drop-hook][WARN] DownloadStarting 挂接失败: %r" % e)
+                _dlog("[drop-hook][WARN] DownloadStarting 挂接失败: %r" % e)
+
+            # 实测（drop_hook.log）三条路都试过了：
+            #   1. NavigationStarting / DownloadStarting —— 拖放时根本不触发
+            #      （WebView2 自己吃掉外部拖放，见 WebView2Feedback #3917）
+            #   2. WinForms 窗体/控件的 DragEnter / DragDrop —— 也不触发，
+            #      鼠标消息被 WebView2 的 Chromium 渲染子窗口挡住了
+            #   3. pywebview 的 DOM drop 事件 —— 可用，见下面的 _bind_dom
+            # 所以这里必须让 WebView2 继续接收外部拖放，DOM 事件才拿得到。
+            try:
+                wv.AllowExternalDrop = True
+                _dlog("[drop-hook] 已确保 WebView2.AllowExternalDrop=True（DOM drop 需要）")
+            except Exception as e:  # noqa: BLE001 - 老版本控件没有该属性
+                _dlog("[drop-hook][WARN] AllowExternalDrop 设置失败: %r" % e)
+
             return True, dl_ok
         return _ui(native, job)
 
@@ -154,22 +229,24 @@ def install_drop_hook(window):
                 break
             time.sleep(0.1)
         if native is None:
-            print("[drop-hook] 未取到原生窗口，拖放不可用（不影响其他功能）")
+            _dlog("[drop-hook] 未取到原生窗口，拖放不可用（不影响其他功能）")
             return
         for _ in range(300):
             try:
                 res = _attach_on_ui(native)
                 if res:
                     dl_ok = bool(res[1]) if isinstance(res, tuple) else False
-                    print("[drop-hook] 拖放拦截已挂接（导航+下载双拦截=%s，apk/ipa 拖入会回传给前端）"
+                    _dlog("[drop-hook] 拖放拦截已挂接（导航+下载双拦截=%s，apk/ipa 拖入会回传给前端）"
                           % ("开" if dl_ok else "关"))
                     return
             except Exception as e:  # noqa: BLE001 - 挂接失败只影响拖放
-                print("[drop-hook] 挂接失败（不影响其他功能）: %r" % e)
+                _dlog("[drop-hook] 挂接失败（不影响其他功能）: %r" % e)
                 return
             time.sleep(0.1)
-        print("[drop-hook] 等待 CoreWebView2 超时，拖放不可用（不影响其他功能）")
+        _dlog("[drop-hook] 等待 CoreWebView2 超时，拖放不可用（不影响其他功能）")
 
+    # loaded = DOM ready，此时才能绑 window.dom.document.events
+    window.events.loaded += _bind_dom
     threading.Thread(target=_wait_and_attach, daemon=True, name="webview-drop-hook").start()
 
 
