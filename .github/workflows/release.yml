@@ -73,7 +73,7 @@ jobs:
       - name: Preflight（必需文件是否都在仓库里）
         run: |
           missing=""
-          for f in ci_version.sh build_mac.sh pyd_pack.py adb_tool.spec setup_pyd.py requirements.txt; do
+          for f in ci_version.sh build_mac.sh pyd_pack.py adb_tool.spec setup_pyd.py requirements.txt config/icon.ico; do
             [ -f "$f" ] || missing="$missing $f"
           done
           if [ -n "$missing" ]; then
@@ -215,7 +215,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install -q --upgrade pip
-          python -m pip install -q -r requirements.txt "cython>=3.0" "pyinstaller>=6.0" setuptools wheel
+          # WITH_IOS=1（job env）要求 runner 上有 pymobiledevice3，否则 spec 会直接报错终止
+          python -m pip install -q -r requirements.txt "pymobiledevice3" "cython>=3.0" "pyinstaller>=6.0" setuptools wheel
 
       - name: Cython build（core/*.py -> *.pyd，源码不入包）
         run: python setup_pyd.py build_ext --inplace
@@ -332,12 +333,14 @@ jobs:
           body: |
             ✨ 功能介绍
 
-            桌面端 Android & iOS 设备调试工具，深色开发主题，包含四大模块：
+            桌面端三平台（Android & iOS & 鸿蒙 NEXT）设备调试工具，深色开发主题，六大模块：
 
-            - 📱 设备管理：ADB(Android) / libimobiledevice(iOS) 设备列表、连接检测
-            - 📄 日志查看：实时抓取 Android logcat、iOS syslog 设备日志
-            - 📦 应用包管理：查看/安装/卸载应用，支持安卓 APK、iOS ipa 基础操作
+            - 📱 设备管理：Android(adb) / iOS(pymobiledevice3) / 鸿蒙(hdc) 设备列表、连接检测
+            - 📄 日志查看：实时 logcat / hilog / iOS 系统日志，Cocos 游戏 JS 日志抓取
+            - 📦 应用包管理：查看/安装/卸载应用，APK / IPA / HAP
             - 📂 文件管理：设备文件上传、下载、浏览
+            - 📈 性能监控：整机或指定应用的 CPU/内存/GPU/FPS，趋势曲线与告警
+            - 🎬 工具与媒体：一键截屏 / 一键录屏，媒体文件管理
 
             ### 下载哪个
 
@@ -347,6 +350,7 @@ jobs:
             | macOS | `*_macos_arm64.dmg`（M 系列）/ `*_macos_x86_64.dmg`（Intel） | 打开镜像拖进 Applications |
             | macOS | 同架构 `*.zip` | 不想装，解压直接运行 |
 
+            > Windows / macOS 包均已内置 iOS 支持（pymobiledevice3）与 adb。
             > macOS 首次打开若提示「无法验证开发者」：右键 -> 打开（仅一次）。
             > 芯片选错会提示「无法打开」，M 系列选 arm64。
           prerelease: ${{ steps.meta.outputs.prerelease }}

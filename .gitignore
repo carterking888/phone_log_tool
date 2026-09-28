@@ -24,6 +24,8 @@ diag_verify_*.log
 # CI 版本号解析脚本（release.yml 调用，必须进仓库）
 !ci_version.sh
 *.ico
+# 应用图标必须进仓库：CI 在干净 runner 上 checkout，没有它打出的包就是默认图标
+!/config/icon.ico
 /config/localhost.json# 运行时产物：截屏/录屏输出（media.py）
 /media/
 # 便携 hdc 二进制（可选内置，见 pyd_pack.py / build_mac.sh）
