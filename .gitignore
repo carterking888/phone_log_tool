@@ -30,3 +30,4 @@ diag_verify_*.log
 /public_settings/
 # 浏览器自动化缓存
 .playwright-cli/
+*/csdn_share.md
