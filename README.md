@@ -92,7 +92,9 @@ python main.py            # 或双击 run.bat
 - Windows 产物含 `fix_and_check.bat`：目标机首次解压后跑一次（解 MOTW + 查 .NET 4.7.2 + WebView2）。
 - mac 产物首次打开右键 → 打开；网络下载的包若报「已损坏」执行
   `xattr -cr device_bebugging_tool.app`。
-- iOS 支持需在打包时以 `WITH_IOS=1`（脚本会询问）装入 pymobiledevice3，产物内嵌运行时，目标机免 Python 环境。
+- iOS 支持打包时自动探测：构建环境装了 pymobiledevice3（`pip install pymobiledevice3`）
+  就自动装入（约 +30MB），产物内嵌运行时目标机免 Python 环境；`WITH_IOS=0` 可强制
+  出精简包，`WITH_IOS=1` 强制装入（环境缺依赖会直接报错）。
 
 ### 发版（push main 或打 tag 自动出双平台包）
 

@@ -387,7 +387,32 @@ def copy_helper_scripts():
     return dst
 
 
+def _resolve_with_ios():
+    """决定本次打包是否带 iOS 支持（spec 的 WITH_IOS 开关）。
+
+    spec 只在环境变量 WITH_IOS=1 时收集 pymobiledevice3（约 +30MB）。以前是
+    纯手动开关，本地打包忘了设就打出「没有 iOS 环境」的包（界面 iOS 一栏
+    显示 未安装 pymobiledevice3）。现在改为自动探测：构建解释器能 import 到
+    pymobiledevice3 就自动带上，与直觉一致。优先级：
+        WITH_IOS=0  强制不带（出精简包）
+        WITH_IOS=1  强制带上（构建环境没有时 spec 会直接报错，CI 可暴露问题）
+        未设置      自动探测 pymobiledevice3，找得到就带
+    """
+    v = os.environ.get("WITH_IOS")
+    if v is None:
+        try:
+            import importlib.util
+            v = "1" if importlib.util.find_spec("pymobiledevice3") else "0"
+        except Exception:  # noqa: BLE001 - 探测失败按没有处理
+            v = "0"
+        print("[ios] WITH_IOS 未设置，自动探测 pymobiledevice3 -> %s" %
+              ("已找到，将打包" if v == "1" else "未安装，跳过（WITH_IOS=1 可强制）"))
+    os.environ["WITH_IOS"] = v
+    return v
+
+
 def run_pyinstaller():
+    _resolve_with_ios()
     # 不要加 --clean：它会批量删除 bincache，被安全删除钩子拦截（exit 1 且无 traceback）
     # spec 文件固定叫 adb_tool.spec：产物名由 spec 内部的 IS_MAC 分支决定
     # （mac 上 APP 是 device_bebugging_tool，但不存在 device_bebugging_tool.spec，
@@ -501,6 +526,12 @@ def check():
         ok.append("便携 hdc: OK")
     else:
         ok.append("便携 hdc: 未内置（鸿蒙功能需目标机自备 hdc）")
+
+    # iOS 支持：报告本次 WITH_IOS 决策（run_pyinstaller 已 resolve）。
+    if os.environ.get("WITH_IOS") == "1":
+        ok.append("iOS 支持: 已内置（pymobiledevice3）")
+    else:
+        ok.append("iOS 支持: 未内置（打包环境没有 pymobiledevice3，或 WITH_IOS=0）")
 
     print("\n[check]")
     for line in ok:

@@ -79,6 +79,13 @@ if WITH_IOS:
 
         ios_bin, ios_dat, ios_hid = _collect_all('pymobiledevice3')
         print('[spec] WITH_IOS=1 -> pymobiledevice3 已收集（qh3 已排除）')
+    except ModuleNotFoundError as _e:
+        # 静默继续的后果：打出一个「看起来正常、iOS 一栏却显示未安装」的包。
+        # WITH_IOS=1 是明确意图，环境缺依赖就该当场失败。
+        raise SystemExit(
+            '[spec][错误] WITH_IOS=1 但当前 Python 环境没有 pymobiledevice3：%s\n'
+            '             先在打包解释器里安装：pip install pymobiledevice3==11.19.3\n'
+            '             或改用 WITH_IOS=0 / 不设置（自动探测）出精简包' % _e)
     except Exception as _e:  # noqa: BLE001
         print('[spec][WARN] WITH_IOS=1 但收集失败: %s' % _e)
 
