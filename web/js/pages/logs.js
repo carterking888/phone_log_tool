@@ -117,7 +117,9 @@ window.logsComponent = function () {
         var l = f[i];
         out.push({
           id: l.id,
-          time: l.time || "",
+          // 表格里只显示到秒（.267 这类毫秒挤占列宽，会叠到级别徽标上）；
+          // 详情弹窗/复制仍保留完整毫秒精度
+          time: (l.time || "").replace(/\.\d+$/, ""),
           level: l.level || "-",
           levelCls: "lv-" + (l.level || "raw").toLowerCase(),
           pid: l.pid,

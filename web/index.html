@@ -37,6 +37,10 @@
       <button class="btn btn--ghost" @click="refreshEnv()" title="重新检测设备">
         <i class="layui-icon layui-icon-refresh"></i> 重新检测
       </button>
+      <button class="btn btn--ghost btn--icon" @click="toggleTheme()"
+              :title="theme==='dark' ? '切换到浅色主题' : '切换到深色主题'">
+        <i class="layui-icon" :class="theme==='dark' ? 'layui-icon-light' : 'layui-icon-moon'"></i>
+      </button>
       <button class="btn btn--ghost btn--icon" @click="openSettings()" title="设置">
         <i class="layui-icon layui-icon-set"></i>
       </button>
@@ -60,17 +64,24 @@
           <div class="devcard" v-for="d in devices.list" :key="d.serial"
                :class="devices.current===d.serial?'is-active':''"
                @click="devices.select(AdbApp, d.serial)">
-            <div class="devcard__ic" :style="{background:d.iconColor}">{{ d.iconText }}</div>
+            <img class="devcard__icimg" v-if="d.iconImg" :src="d.iconImg" alt="">
+            <div class="devcard__ic" v-else :style="{background:d.iconColor}">{{ d.iconText }}</div>
             <div class="devcard__main">
               <div class="devcard__name">{{ d.model }} <span class="muted sm" v-show="d.device">({{ d.device }})</span></div>
               <div class="devcard__meta">{{ d.serial }}</div>
               <div class="devcard__tags">
-                <span class="tag" :class="d.platform==='ios'?'tag--ios':'tag--plain'">{{ d.platformText }}</span>
+                <span class="tag" :class="d.platform==='ios'?'tag--ios':(d.platform==='harmony'?'tag--harmony':'tag--plain')">{{ d.platformText }}</span>
                 <span class="tag" :class="d.stateCls">{{ d.stateText }}</span>
                 <span class="tag tag--plain">{{ d.transportText }}</span>
               </div>
             </div>
             <button class="btn btn--sm btn--primary" @click="go('logs')">查看日志</button>
+            <!-- 离线/未授权/无线设备可移除：无线先断开，离线设备隐藏，历史一并删 -->
+            <button class="devcard__del" v-show="d.state!=='device' || d.transport==='wifi'"
+                    title="移除该设备（无线设备会断开连接）"
+                    @click.stop="devices.removeDevice(AdbApp, d.serial)">
+              <i class="layui-icon layui-icon-close"></i>
+            </button>
           </div>
           <div class="empty" v-show="!devices.list.length">
             未检测到设备<br><span class="muted sm">请检查 USB 调试开关与数据线</span><br>
@@ -78,6 +89,33 @@
                     @click="setDemo(true)">查看演示模式</button>
           </div>
         </div>
+
+        <!-- 历史设备：连接过但当前不在线的记录，可删除；无线设备点击可回连 -->
+        <div class="side__hd side__hd--sub" v-show="devices.history.length">
+          历史设备 <span class="count">{{ devices.history.length }}</span>
+        </div>
+        <div class="devlist devlist--hist" v-show="devices.history.length">
+          <div class="devcard devcard--hist" v-for="h in devices.history" :key="'h-'+h.serial"
+               :title="h.isWifi ? '点击回连无线设备' : '上次连接：' + (h.lastSeen || '')"
+               @click="devices.clickHistory(AdbApp, h)">
+            <img class="devcard__icimg" v-if="h.iconImg" :src="h.iconImg" alt="">
+            <div class="devcard__ic devcard__ic--dim" v-else :style="{background:h.iconColor}">{{ h.iconText }}</div>
+            <div class="devcard__main">
+              <div class="devcard__name">{{ h.model || h.serial }}</div>
+              <div class="devcard__meta">{{ h.serial }}</div>
+              <div class="devcard__tags">
+                <span class="tag" :class="h.platform==='ios'?'tag--ios':(h.platform==='harmony'?'tag--harmony':'tag--plain')">{{ h.platformText }}</span>
+                <span class="tag tag--plain">{{ h.isWifi ? '无线' : 'USB' }}</span>
+                <span class="tag tag--plain muted">{{ h.lastSeen || '' }}</span>
+              </div>
+            </div>
+            <button class="devcard__del" title="删除这条历史记录"
+                    @click.stop="devices.removeHistory(AdbApp, h.serial)">
+              <i class="layui-icon layui-icon-close"></i>
+            </button>
+          </div>
+        </div>
+
         <button class="btn btn--dash" @click="devices.wifiModal=true">+ 添加更多 ADB 设备</button>
       </aside>
 
@@ -107,6 +145,8 @@
               <div class="kv__row"><span>无线设备</span><b>{{ devices.wifiCount }} 台</b></div>
               <div class="kv__row"><span>iOS 支持</span>
                 <b :class="env.iosAvailable?'t-ok':'t-warn'">{{ env.iosAvailable ? ('已启用 ' + env.iosLibVersion) : (env.iosReason || '未启用') }}</b></div>
+              <div class="kv__row"><span>鸿蒙 hdc</span>
+                <b :class="env.hdcFound?'t-ok':'t-warn'">{{ env.hdcFound ? ('已找到 ' + (env.hdcVersion || '')) : '未找到（安装 DevEco Studio 或放入 public_settings/hdc）' }}</b></div>
               <div class="kv__row"><span>授权状态</span><b class="tag" :class="devices.authCls">{{ devices.authText }}</b></div>
             </div>
           </div>
@@ -115,7 +155,7 @@
             <div class="card__hd"><span class="card__title">快捷操作</span></div>
             <div class="btns">
               <button class="btn" @click="devices.refresh(AdbApp)">重新检测设备</button>
-              <button class="btn" @click="devices.wifiModal=true">无线 ADB 连接</button>
+              <button class="btn" @click="devices.wifiModal=true">无线设备连接</button>
               <button class="btn btn--primary" @click="go('logs')">开始查看实时日志</button>
             </div>
           </div>
@@ -123,7 +163,7 @@
 
         <div class="card" v-if="devices.detail">
           <div class="card__hd"><span class="card__title">当前设备详细信息</span>
-            <span class="tag ok">device</span></div>
+            <span class="tag" :class="devices.detail.state==='device'?'ok':'warn'">{{ {device:'在线', unauthorized:'未授权', offline:'离线'}[devices.detail.state] || '在线' }}</span></div>
           <div class="detailgrid">
             <div class="dfield" v-for="f in devices.detailFields" :class="f.wide?'is-wide':''">
               <span class="dfield__label">{{ f.label }}</span>
@@ -131,6 +171,10 @@
             </div>
           </div>
           <div class="rowend">
+            <button class="btn btn--ghost btn--sm" v-show="devices.curTransport==='usb' && devices.curPlatform!=='ios'"
+                    @click="devices.enableWireless(AdbApp)" :disabled="devices.wifiBusy">切换无线模式</button>
+            <button class="btn btn--ghost btn--sm" v-show="devices.curTransport==='wifi'"
+                    @click="devices.disconnectWireless(AdbApp)">断开无线</button>
             <button class="btn btn--ghost btn--sm" @click="devices.copySerial(AdbApp)">复制序列号</button>
           </div>
         </div>
@@ -149,8 +193,8 @@
     <!-- ============================ 模块二：日志 ============================ -->
     <section class="page" v-show="route==='logs'">
       <aside class="side">
-        <div class="side__hd">日志缓冲区</div>
-        <div class="buflist">
+        <div class="side__hd" v-show="!isHarmony">日志缓冲区</div>
+        <div class="buflist" v-show="!isHarmony">
           <div class="bufitem" v-for="b in logs.buffers" :key="b.key"
                :class="logs.buffer===b.key?'is-active':''"
                @click="logs.setBuffer(AdbApp, b.key)">
@@ -159,6 +203,7 @@
             <span class="muted sm">{{ b.desc }}</span>
           </div>
         </div>
+        <div class="sidenote" v-show="isHarmony">鸿蒙设备走 hilog 单流（无缓冲区概念），已尽力关闭隐私掩码；部分系统版本内容仍显示 &lt;private&gt;。</div>
 
         <div class="side__hd">日志过滤</div>
         <div class="card card--inner">
@@ -595,22 +640,355 @@
         </div>
       </div>
     </section>
+
+    <!-- ============================ 模块五：性能 ============================ -->
+    <section class="page" v-show="route==='perf'">
+      <div class="content">
+        <div class="content__hd">
+          <h2>设备性能实时监控</h2>
+          <span class="tag" :class="perf.running?'ok':''">{{ perf.stateText }}</span>
+          <span class="muted" v-show="perf.pkg">监控进程：{{ perf.pkg }}</span>
+          <span class="muted" v-show="!perf.pkg">整机性能</span>
+          <div class="spacer"></div>
+          <span class="muted sm">采样间隔</span>
+          <select class="select" v-model="perf.interval" :disabled="perf.running">
+            <option value="0.5">0.5 秒</option>
+            <option value="1">1 秒</option>
+            <option value="2">2 秒</option>
+            <option value="5">5 秒</option>
+          </select>
+          <span class="muted sm">时间窗口</span>
+          <select class="select" v-model.number="perf.windowSec">
+            <option :value="30">30 秒</option>
+            <option :value="60">60 秒</option>
+            <option :value="120">120 秒</option>
+            <option :value="300">300 秒</option>
+          </select>
+          <button class="btn btn--sm" :class="perf.running?'btn--danger':'btn--primary'"
+                  @click="perf.running ? perf.stopMon(AdbApp) : perf.startMon(AdbApp)">{{ perf.running ? '停止记录' : '开始记录' }}</button>
+          <button class="btn btn--sm" :class="perf.tracing?'btn--danger':''" v-show="perf.isIos"
+                  @click="perf.toggleTrace(AdbApp)">{{ perf.tracing ? '停止 Trace' : '录制系统 Trace' }}</button>
+          <button class="btn btn--sm" @click="perf.reset(AdbApp)">重置</button>
+          <button class="btn btn--sm" @click="perf.doExport(AdbApp)">导出性能数据</button>
+          <button class="btn btn--sm" @click="perf.doImport(AdbApp)">导入数据</button>
+          <button class="btn btn--sm" @click="perf.thModal=true">告警阈值设置</button>
+        </div>
+
+        <div class="hint" v-show="perf.isIos">
+          iOS 采样基于 Instruments 通道（非越狱）：整机/应用 CPU、应用内存(PhysFootprint)、整机内存、FPS、网络上下行、电池电量/温度/电压/电流。
+          限制：采样模式，瞬时峰值可能丢失；采样间隔过小会断连（建议 ≥1s）；非越狱拿不到 GPU 硬件 counter 与内核线程调度；FPS/网络通道随系统版本差异可能不可用（对应曲线为空）。
+          监控指定应用需先在手机上打开该应用。
+        </div>
+        <div class="warnbox" v-show="perf.tracing">系统 Trace 录制中：{{ perf.tracingName }}（iOS 17+ Windows 不支持；录制期间请保持设备连接）</div>
+        <div class="warnbox" v-show="perf.viewingImport">
+          正在查看导入数据：<b>{{ perf.viewingImport }}</b>（共 {{ perf.count }} 条采样，只读回放）
+          <button class="btn btn--sm" @click="perf.exitImport(AdbApp)">退出回放</button>
+        </div>
+
+        <div class="grid grid--3">
+          <div class="card">
+            <div class="card__hd"><span class="card__title">选择监控目标</span></div>
+            <div class="field">
+              <label>性能维度</label>
+              <select class="select" v-model="perf.pkg" :disabled="perf.running">
+                <option value="">整机（所有进程）</option>
+                <option v-for="p in perf.pkgList" :key="p" :value="p">{{ p }}</option>
+              </select>
+            </div>
+            <div class="hint" v-show="!perf.pkg">不选择应用则为整机整体性能。</div>
+            <div class="hint" v-show="perf.pkg">指定应用：CPU/内存/FPS 按该应用单独统计。</div>
+            <button class="btn btn--sm" @click="perf.loadPkgs(AdbApp)" :disabled="perf.pkgLoading">刷新应用列表</button>
+          </div>
+          <div class="card">
+            <div class="card__hd"><span class="card__title">采样汇总</span></div>
+            <div class="kv">
+              <div class="kv__row"><span>监控进程</span><b>{{ perf.pkg || '整机' }}</b></div>
+              <div class="kv__row"><span>采样次数</span><b>{{ perf.count }}</b></div>
+              <div class="kv__row"><span>平均帧率</span><b>{{ perf.summary.avgFps != null ? perf.summary.avgFps : '—' }}</b></div>
+              <div class="kv__row"><span>最高 CPU</span><b :class="perf.summary.maxCpu>=perf.thCpu?'t-danger':''">{{ perf.summary.maxCpu != null ? perf.summary.maxCpu + '%' : '—' }}</b></div>
+              <div class="kv__row"><span>告警次数</span><b :class="perf.alarmCount?'t-warn':''">{{ perf.alarmCount }}</b></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card__hd"><span class="card__title">最近告警</span>
+              <span class="tag" :class="perf.alarmCount?'warn':''" v-show="perf.alarmCount">{{ perf.alarmCount }}</span></div>
+            <div class="empty sm" v-show="!perf.alarmCount">暂无告警（CPU {{ perf.thCpu }}% / 内存 {{ perf.thMem }}% 触发）</div>
+            <div class="kv" v-show="perf.alarmCount">
+              <div class="kv__row" v-for="a in perf.alarms.slice(-5)"><span>{{ new Date(a.t*1000).toLocaleTimeString() }}</span><b class="t-danger">{{ a.text }}</b></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid grid--4">
+          <div class="card gaugecard"><div class="card__hd"><span class="card__title">CPU</span></div><div id="gaugeCpu" class="gauge"></div></div>
+          <div class="card gaugecard"><div class="card__hd"><span class="card__title">内存</span></div><div id="gaugeMem" class="gauge"></div></div>
+          <div class="card gaugecard"><div class="card__hd"><span class="card__title">GPU</span><span class="muted sm">暂不支持</span></div><div class="empty sm">设备 GPU 占用无公开采样接口</div></div>
+          <div class="card gaugecard"><div class="card__hd"><span class="card__title">实时帧率</span></div>
+            <div class="bigstat">{{ perf.latest && perf.latest.fps != null ? perf.latest.fps : '—' }}<span class="muted sm"> FPS</span></div>
+            <div class="hint">FPS 仅 Android 指定应用支持（dumpsys gfxinfo）；鸿蒙无公开采样接口</div>
+          </div>
+        </div>
+
+        <div class="grid grid--2">
+          <div class="card"><div id="perfCpu" class="chart"></div></div>
+          <div class="card"><div id="perfMem" class="chart"></div></div>
+          <div class="card"><div id="perfNet" class="chart"></div></div>
+          <div class="card"><div id="perfFps" class="chart"></div></div>
+        </div>
+
+        <div class="grid grid--3">
+          <!-- 各核心占用 -->
+          <div class="card">
+            <div class="card__hd"><span class="card__title">各核心占用</span>
+              <span class="muted sm">{{ perf.ex.coreCount ? perf.ex.coreCount + ' 核' : '' }}</span></div>
+            <div class="corebars">
+              <div class="corebar" v-for="c in perf.ex.cores" :key="c.i">
+                <span class="corebar__label">核心 {{ c.i }}</span>
+                <div class="corebar__track"><div class="corebar__fill" :class="{hot: c.hot}" :style="{ width: c.pct + '%' }"></div></div>
+                <span class="corebar__val">{{ c.pct }}%</span>
+              </div>
+              <div class="empty sm" v-show="!perf.ex.cores.length">暂无数据（开始记录后显示）</div>
+            </div>
+          </div>
+          <!-- 电池状态 -->
+          <div class="card">
+            <div class="card__hd"><span class="card__title">电池状态</span>
+              <span class="tag" :class="perf.ex.batCharging ? 'ok' : ''" v-show="perf.ex.batText">{{ perf.ex.batText }}</span></div>
+            <div class="kv" v-show="perf.ex.batLevel != null">
+              <div class="kv__row"><span>电量</span><b>{{ perf.ex.batLevel }}%</b></div>
+            </div>
+            <div class="batbar" v-show="perf.ex.batLevel != null">
+              <div class="batbar__fill" :class="{low: perf.ex.batLevel <= 20}" :style="{ width: perf.ex.batLevel + '%' }"></div>
+            </div>
+            <div class="kv">
+              <div class="kv__row"><span>温度</span><b>{{ perf.ex.batTemp != null ? perf.ex.batTemp + ' ℃' : '—' }}</b></div>
+              <div class="kv__row"><span>电压</span><b>{{ perf.ex.batVolt != null ? perf.ex.batVolt + ' V' : '—' }}</b></div>
+              <div class="kv__row"><span>电流</span><b>{{ perf.ex.batCurrent != null ? perf.ex.batCurrent.toFixed(2) + ' A' : '—' }}</b></div>
+              <div class="kv__row"><span>功率</span><b>{{ perf.ex.batPower != null ? perf.ex.batPower + ' W' : '—' }}</b></div>
+            </div>
+            <div class="empty sm" v-show="perf.ex.batLevel == null">暂无数据（开始记录后显示）</div>
+          </div>
+          <!-- 磁盘 I/O 与温度 -->
+          <div class="card">
+            <div class="card__hd"><span class="card__title">磁盘 I/O 与温度</span></div>
+            <div class="kv">
+              <div class="kv__row"><span>读取速率</span><b>{{ perf.ex.diskRead != null ? perf.ex.diskRead + ' MB/s' : '—' }}</b></div>
+              <div class="kv__row"><span>写入速率</span><b>{{ perf.ex.diskWrite != null ? perf.ex.diskWrite + ' MB/s' : '—' }}</b></div>
+              <div class="kv__row"><span>CPU 温度</span><b :class="perf.ex.cpuTemp >= 60 ? 't-danger' : ''">{{ perf.ex.cpuTemp != null ? perf.ex.cpuTemp + ' ℃' : '—' }}</b></div>
+              <div class="kv__row"><span>GPU 温度</span><b>{{ perf.ex.gpuTemp != null ? perf.ex.gpuTemp + ' ℃' : '—' }}</b></div>
+              <div class="kv__row"><span>电池温度</span><b>{{ perf.ex.batTemp != null ? perf.ex.batTemp + ' ℃' : '—' }}</b></div>
+            </div>
+            <div class="hint">磁盘 I/O 与 CPU/GPU 温度仅 Android 支持；鸿蒙系统限制 shell 读取权限</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ 模块六：工具与媒体 ============================ -->
+    <section class="page" v-show="route==='media'">
+      <div class="content">
+        <div class="content__hd">
+          <h2>工具与媒体</h2>
+          <span class="muted">一键截屏与录屏，并集中管理生成的图片与视频文件</span>
+        </div>
+
+        <div class="grid grid--2">
+          <!-- 录屏 -->
+          <div class="card">
+            <div class="card__hd"><span class="card__title">一键录屏</span>
+              <span class="muted sm">{{ media.isHarmony ? '基于 snapshot_display（仅截屏可用）' : (media.isIos ? '连续截屏帧合成 MP4（仅画面）' : '基于 screenrecord 录制设备屏幕') }}</span>
+              <span class="tag" :class="media.recording?'ok':''" v-show="media.recording">录制中 {{ media.fmtTime(media.recElapsed) }}</span></div>
+            <div class="field" v-show="!media.isIos">
+              <label>分辨率</label>
+              <select class="select" v-model="media.recResolution" :disabled="media.recording || media.recordBlocked">
+                <option value="">原始分辨率</option>
+                <option value="1080p">1080p</option>
+                <option value="720p">720p</option>
+              </select>
+            </div>
+            <div class="field" v-show="!media.isIos">
+              <label>视频码率</label>
+              <select class="select" v-model="media.recBitrate" :disabled="media.recording || media.recordBlocked">
+                <option value="4">4 Mbps</option>
+                <option value="8">8 Mbps</option>
+                <option value="12">12 Mbps</option>
+                <option value="16">16 Mbps</option>
+              </select>
+            </div>
+            <div class="field" v-show="media.isIos">
+              <label>截屏帧率</label>
+              <select class="select" v-model="media.recFps" :disabled="media.recording || media.recordBlocked">
+                <option value="2">2 fps（最流畅，帧少）</option>
+                <option value="5">5 fps（推荐）</option>
+                <option value="8">8 fps（推荐）</option>
+                <option value="15">15 fps（较快机型）</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>时长上限</label>
+              <select class="select" v-model="media.recDuration" :disabled="media.recording || media.recordBlocked">
+                <option value="30">30 秒</option>
+                <option value="60">1 分钟</option>
+                <option value="120">2 分钟</option>
+                <option value="180">3 分钟</option>
+                <option value="300">5 分钟</option>
+                <option value="600">10 分钟</option>
+                <option value="custom">自定义…</option>
+              </select>
+            </div>
+            <div class="field" v-show="media.recDuration==='custom'">
+              <label>自定义时长（分钟，1-5000）</label>
+              <input type="number" min="1" max="5000" v-model="media.recDurationCustom" :disabled="media.recording || media.recordBlocked">
+            </div>
+            <div class="field">
+              <label>保存名称</label>
+              <input type="text" v-model="media.recName" placeholder="record_日期" :disabled="media.recording || media.recordBlocked">
+            </div>
+            <div class="hint" v-show="media.isIos && !media.recordBlocked">录屏只采集画面：不含触摸事件 / 点击坐标，无声音；中断（设备断开）或到时会自动保存已录制部分。</div>
+            <div class="switchrow" v-show="media.isAndroid">
+              <label class="switch"><input type="checkbox" v-model="media.recAudio" :disabled="media.recording"><span></span></label>
+              <span>录制声音<span class="muted sm">（Android 11+）</span></span>
+            </div>
+            <div class="switchrow" v-show="media.isAndroid">
+              <label class="switch"><input type="checkbox" v-model="media.recTouch" :disabled="media.recording"><span></span></label>
+              <span>显示触摸坐标</span>
+            </div>
+            <div class="switchrow" v-show="media.isAndroid">
+              <label class="switch"><input type="checkbox" v-model="media.recStay" :disabled="media.recording"><span></span></label>
+              <span>保持屏幕常亮</span>
+            </div>
+            <div class="warnbox" v-show="media.recordBlocked">{{ media.caps ? media.caps.recordHint : '' }}</div>
+            <button class="btn btn--lg" :class="media.recording?'btn--danger':'btn--primary'"
+                    @click="media.toggleRecord(AdbApp)"
+                    :disabled="media.recordBlocked || media.recBusy">
+              {{ media.recordBtnText }}
+            </button>
+            <div class="shotprev recprev" v-show="media.recVideoUrl">
+              <video controls preload="metadata" :src="media.recVideoUrl"></video>
+              <div class="muted sm" style="text-align:center">{{ media.recVideoName }}（{{ media.recSeconds }}）</div>
+              <div class="rowbtns">
+                <button class="btn btn--sm" @click="media.openFile(AdbApp, media.recVideoName)">打开</button>
+                <button class="btn btn--sm btn--primary" @click="media.saveVideo(AdbApp)">另存为</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 截屏 -->
+          <div class="card">
+            <div class="card__hd"><span class="card__title">一键截屏</span>
+              <span class="muted sm">截取当前设备屏幕并生成图片</span></div>
+            <div class="switchrow">
+              <label class="switch"><input type="checkbox" v-model="media.shotSave"><span></span></label>
+              <span>截屏后自动保存到设备</span>
+            </div>
+            <div class="switchrow">
+              <label class="switch"><input type="checkbox" v-model="media.shotCopy"><span></span></label>
+              <span>同时复制到剪贴板</span>
+            </div>
+            <div class="warnbox" v-show="media.shotBlocked">{{ media.caps ? media.caps.screenshotHint : '' }}</div>
+            <button class="btn btn--lg btn--primary" @click="media.doScreenshot(AdbApp)"
+                    :disabled="media.shotBlocked || media.shotBusy">一键截取当前屏幕</button>
+            <div class="shotprev" v-show="media.shotPreview" @click="media.openShot(AdbApp)" title="点击打开原图">
+              <img :src="media.shotPreview" alt="截图预览">
+              <div class="muted sm" style="text-align:center">{{ media.shotFile }}（点击打开）</div>
+            </div>
+            <div class="empty sm" v-show="!media.shotPreview">点击「一键截取当前屏幕」生成图片</div>
+          </div>
+        </div>
+
+        <!-- 媒体库 -->
+        <div class="card">
+          <div class="card__hd"><span class="card__title">媒体文件 <span class="muted">{{ media.filteredFiles.length }} 个</span></span></div>
+          <div class="chips">
+            <button class="chip" :class="media.filterKind==='all'?'is-active':''" @click="media.setFilter('all')">全部</button>
+            <button class="chip" :class="media.filterKind==='image'?'is-active':''" @click="media.setFilter('image')">截屏图片</button>
+            <button class="chip" :class="media.filterKind==='video'?'is-active':''" @click="media.setFilter('video')">录屏视频</button>
+            <div class="spacer"></div>
+            <input class="input" type="text" v-model="media.keyword" @input="media.page=1" placeholder="搜索文件名称">
+            <button class="btn btn--sm" @click="media.refresh(AdbApp)">刷新</button>
+          </div>
+          <div class="tbl">
+            <table>
+              <thead><tr><th>文件名称</th><th>类型</th><th>大小</th><th>时长</th><th>创建时间</th><th>操作</th></tr></thead>
+              <tbody>
+                <tr v-for="f in media.pagedFiles" :key="f.name">
+                  <td class="mono">{{ f.name }}</td>
+                  <td><span class="tag">{{ media.kindText(f.kind) }}</span></td>
+                  <td>{{ media.sizeText(f.size) }}</td>
+                  <td>{{ f.duration ? media.fmtDur(f.duration) : '—' }}</td>
+                  <td class="muted">{{ f.mtime }}</td>
+                  <td>
+                    <button class="btn btn--sm" @click="media.openFile(AdbApp, f.name)">打开</button>
+                    <button class="btn btn--sm" @click="media.askRename(f)">重命名</button>
+                    <button class="btn btn--sm btn--danger" @click="media.deleteFile(AdbApp, f)">删除</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="empty sm" v-show="!media.filteredFiles.length">暂无媒体文件</div>
+            <div class="pager" v-show="media.filteredFiles.length">
+              <button class="btn btn--sm" :disabled="media.page<=1" @click="media.goPage(media.page-1)">上一页</button>
+              <span class="muted sm">第 {{ media.page }} / {{ media.totalPages }} 页 · 共 {{ media.filteredFiles.length }} 条</span>
+              <button class="btn btn--sm" :disabled="media.page>=media.totalPages" @click="media.goPage(media.page+1)">下一页</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
 
   <!-- ============================== 弹窗 ============================== -->
   <div class="mask" v-show="devices.wifiModal" @click="devices.wifiModal=false"></div>
   <div class="modal" v-show="devices.wifiModal">
-    <div class="modal__hd">无线 ADB 连接 <i class="layui-icon layui-icon-close" @click="devices.wifiModal=false"></i></div>
+    <div class="modal__hd">无线设备连接 <i class="layui-icon layui-icon-close" @click="devices.wifiModal=false"></i></div>
     <div class="modal__bd">
       <div class="field">
         <label>设备地址</label>
         <input type="text" v-model="devices.wifiAddr" placeholder="192.168.1.20:5555">
       </div>
-      <div class="hint">先通过 USB 连接执行 <code>adb tcpip 5555</code>，再输入设备 IP 连接。</div>
+      <div class="hint">Android：先 USB 连接执行 <code>adb tcpip 5555</code>，再输入 IP 连接。</div>
+      <div class="hint">鸿蒙：手机 开发者选项 → 无线调试 开启，输入显示的 <code>IP:端口</code>；或 USB 连接时输入 <code>IP:10123</code>（工具会自动改用 hdc tconn）。</div>
     </div>
     <div class="modal__ft">
       <button class="btn" @click="devices.wifiModal=false">取消</button>
       <button class="btn btn--primary" @click="devices.connectWireless(AdbApp)">连接</button>
+    </div>
+  </div>
+
+  <!-- 重命名媒体文件 -->
+  <div class="mask" v-show="media.renameModal" @click="media.renameModal=false"></div>
+  <div class="modal" v-show="media.renameModal">
+    <div class="modal__hd">重命名媒体文件 <i class="layui-icon layui-icon-close" @click="media.renameModal=false"></i></div>
+    <div class="modal__bd">
+      <div class="field">
+        <label>新文件名</label>
+        <input type="text" v-model="media.renameNew" @keyup.enter="media.doRename(AdbApp)">
+      </div>
+    </div>
+    <div class="modal__ft">
+      <button class="btn" @click="media.renameModal=false">取消</button>
+      <button class="btn btn--primary" @click="media.doRename(AdbApp)">确定</button>
+    </div>
+  </div>
+
+  <!-- 告警阈值设置 -->
+  <div class="mask" v-show="perf.thModal" @click="perf.thModal=false"></div>
+  <div class="modal" v-show="perf.thModal">
+    <div class="modal__hd">告警阈值设置 <i class="layui-icon layui-icon-close" @click="perf.thModal=false"></i></div>
+    <div class="modal__bd">
+      <div class="field">
+        <label>CPU 占用告警阈值（%）</label>
+        <input type="number" min="1" max="100" v-model.number="perf.thCpu">
+      </div>
+      <div class="field">
+        <label>内存占用告警阈值（%）</label>
+        <input type="number" min="1" max="100" v-model.number="perf.thMem">
+      </div>
+      <div class="hint">采样过程中超过阈值会记入告警列表并累计告警次数。运行中保存会以新阈值重启采样。</div>
+    </div>
+    <div class="modal__ft">
+      <button class="btn" @click="perf.thModal=false">取消</button>
+      <button class="btn btn--primary" @click="perf.saveThresholds(AdbApp)">保存</button>
     </div>
   </div>
 
@@ -719,18 +1097,21 @@
       <div class="btns" v-show="!isIos">
         <button class="btn" @click="apps.appAction(AdbApp, 'start')">启动</button>
         <button class="btn" @click="apps.appAction(AdbApp, 'stop')">强制停止</button>
-        <button class="btn" @click="apps.appAction(AdbApp, 'clear')">清除数据</button>
-        <button class="btn" @click="apps.appAction(AdbApp, 'disable')">停用</button>
+        <button class="btn" v-show="!apps.isHarmony" @click="apps.appAction(AdbApp, 'clear')">清除数据</button>
+        <button class="btn" v-show="!apps.isHarmony" @click="apps.appAction(AdbApp, 'disable')">停用</button>
       </div>
       <div class="muted sm" v-show="isIos">
         iOS 非越狱设备不提供启动 / 强制停止 / 清除数据等能力（只能用下面的卸载）。
+      </div>
+      <div class="muted sm" v-show="apps.isHarmony">
+        鸿蒙设备支持启动 / 强制停止 / 卸载；清除数据与停用暂无公开能力。
       </div>
       <div class="sect">运行时权限
         <span class="muted sm" v-show="!apps.permsUnsupported">已授予 {{ apps.detail.granted }}/{{ apps.detail.requested }} 项</span>
         <span class="muted sm" v-show="apps.dangerPermCount"> · <b class="t-danger">危险 {{ apps.dangerPermCount }}</b> 项</span>
       </div>
       <div class="warnbox" v-show="apps.permsUnsupported">
-        iOS 非越狱设备不提供权限列表（需挂载开发者镜像解析 entitlements），此处无法展示。
+        {{ apps.permsHint }}
       </div>
       <div class="permgrid" v-show="!apps.permsUnsupported">
         <div class="perm" v-for="p in apps.detailPerms" :key="p.raw"
@@ -796,7 +1177,7 @@
           <i class="layui-icon layui-icon-close filepicked__clear" title="移除" @click="apps.clearInstallFile()"></i>
         </div>
       </div>
-      <div class="field" v-show="!apps.isIos">
+      <div class="field" v-show="!apps.isIos && !apps.isHarmony">
         <label>安装选项</label>
         <label class="checklabel"><input type="checkbox" v-model="apps.installOpts.r"> -r 覆盖安装</label>
         <label class="checklabel"><input type="checkbox" v-model="apps.installOpts.d"> -d 允许降级</label>
@@ -966,6 +1347,14 @@
         <div class="hint">自动探测结果：<span class="mono">{{ settings.detected }}</span></div>
       </div>
       <div class="field">
+        <label>hdc 可执行文件路径（纯血鸿蒙用，留空则自动探测）</label>
+        <input type="text" v-model="settings.hdcPath" placeholder="如 DevEco Studio SDK 的 toolchains\\hdc.exe">
+        <div class="hint">
+          纯血鸿蒙（HarmonyOS NEXT）设备通过 hdc 连接：安装 DevEco Studio 自带，
+          或把 hdc 整目录放到程序旁的 <span class="mono">public_settings/hdc/</span> 下。
+        </div>
+      </div>
+      <div class="field">
         <label>Cocos iOS JS 调试地址（可选）</label>
         <input type="text" v-model="settings.cocosInspector" placeholder="iOS 填设备端口如 6086（USB 自动转发）；也可填 host:port">
         <div class="hint">
@@ -1002,11 +1391,14 @@
 
 <script src="vendor/layui/layui.js"></script>
 <script src="vendor/petite-vue.iife.js"></script>
+<script src="vendor/echarts.min.js"></script>
 <script src="js/util.js"></script>
 <script src="js/pages/devices.js"></script>
 <script src="js/pages/logs.js"></script>
 <script src="js/pages/apps.js"></script>
 <script src="js/pages/files.js"></script>
+<script src="js/pages/perf.js"></script>
+<script src="js/pages/media.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

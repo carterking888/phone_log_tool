@@ -99,18 +99,18 @@ if not TARGETS:
 
 print("[cython] targets: %s\n" % ", ".join(TARGETS))
 
-# ---- 版本号对齐「最近发布的 tag」（必须赶在 Cython 编译之前）----
+# ---- 版本号对齐「本次构建版本」（最新 tag 的 patch+1，必须赶在 Cython 编译之前）----
 # 打包态界面显示的版本号是**编译进去**的 APP_VERSION，而仓库里的值只由 CI 在 runner
-# 上改写、不回写仓库，本地会一直停在旧值（2.7.0），与 GitHub 上的包（2.7.2）对不上。
-# 这里在本地打包时补齐；CI 上 ci_version.sh 已写入「最新 tag + 1」，比任何现存 tag
-# 都新 -> 这一步是 no-op，不会把版本号改小。
+# 上改写、不回写仓库，本地会一直停在旧值（2.7.0），与 GitHub 上的包对不上。
+# 这里在本地打包时按 ci_version.sh 同款规则递增：上一个发布是 v2.7.4 -> 本地包 2.7.5；
+# CI 上 ci_version.sh 已写入同样的值 -> 这一步是 no-op，不会把版本号改小。
 try:
     import pyd_pack
     _synced = pyd_pack.sync_version_from_tag()
     if _synced:
-        print("[version] APP_VERSION %s -> %s（对齐最近发布的 tag）\n" % _synced)
+        print("[version] APP_VERSION %s -> %s（对齐本次构建版本：最新 tag +1）\n" % _synced)
 except Exception as _e:  # noqa: BLE001 - 对齐失败不能挡住编译
-    print("[version] 对齐 tag 失败（忽略）：%s\n" % _e)
+    print("[version] 版本号对齐失败（忽略）：%s\n" % _e)
 
 setup(
     name="adb_tool_core",

@@ -60,7 +60,7 @@ def find_free_port():
 # 因此前端**不能**对 drop/dragover preventDefault（那会吃掉默认行为导致
 # 两个事件都不触发）——拖放提示高亮之类也不要做。
 # ---------------------------------------------------------------------------
-DROP_EXTS = (".apk", ".xapk", ".apks", ".ipa")
+DROP_EXTS = (".apk", ".xapk", ".apks", ".ipa", ".hap")
 
 # 诊断用：拖放日志同时落盘，避免被 pywebview/pythonnet 的控制台噪音刷掉。
 DROP_LOG = os.path.join(
@@ -300,6 +300,77 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
+
+    def translate_path(self, path):
+        # /config/* -> config 资源目录（鸿蒙设备图标 log.png 等，源码与打包态同路径）。
+        # /media/*  -> 媒体库目录（录屏/截屏文件的 <video> 内嵌预览）。
+        # web 目录由 SimpleHTTPRequestHandler 的 directory 处理，这里只拦以上前缀。
+        clean = path.split("?", 1)[0].split("#", 1)[0]
+        if clean.startswith("/config/"):
+            rel = urllib.parse.unquote(clean[len("/config/"):]).lstrip("/")
+            parts = [p for p in rel.split("/") if p not in ("", ".", "..")]
+            return os.path.join(resource_path("config"), *parts)
+        if clean.startswith("/media/"):
+            from core.media import media_dir
+            rel = urllib.parse.unquote(clean[len("/media/"):]).lstrip("/")
+            parts = [p for p in rel.split("/") if p not in ("", ".", "..")]
+            return os.path.join(media_dir(), *parts)
+        return super().translate_path(path)
+
+    # ------------------- Range 支持（仅 /media/）-------------------
+    # Chromium 的 <video> 会发 Range 请求拖动进度条；SimpleHTTPRequestHandler
+    # 只会整个 200 回，拖动会卡死。这里对 /media/ 的文件实现单段 Range（206）。
+    def _media_range_body(self):
+        """解析 /media/ 文件请求，需要回 206 时直接写 body，返回 True。"""
+        clean = self.path.split("?", 1)[0]
+        if not clean.startswith("/media/"):
+            return False
+        p = self.translate_path(clean)
+        if not os.path.isfile(p):
+            return False
+        rng = self.headers.get("Range", "")
+        if not rng.startswith("bytes="):
+            return False  # 整文件 200，交给默认逻辑
+        import mimetypes
+        size = os.path.getsize(p)
+        try:
+            start_s, end_s = rng[6:].split("-", 1)
+            start = int(start_s) if start_s else 0
+            end = int(end_s) if end_s else size - 1
+        except ValueError:
+            start, end = 0, size - 1
+        end = min(end, size - 1)
+        if start < 0 or start > end or start >= size:
+            self.send_response(416)
+            self.send_header("Content-Range", "bytes */%d" % size)
+            self.end_headers()
+            return True
+        ctype = mimetypes.guess_type(p)[0] or "application/octet-stream"
+        self.send_response(206)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        self.end_headers()
+        if self.command != "HEAD":
+            with open(p, "rb") as f:
+                f.seek(start)
+                remaining = end - start + 1
+                while remaining > 0:
+                    chunk = f.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        return True
+
+    def send_head(self):
+        try:
+            if self._media_range_body():
+                return None
+        except Exception:  # noqa: BLE001 - Range 出错回落默认整文件响应
+            pass
+        return super().send_head()
 
 
 def start_server(directory):

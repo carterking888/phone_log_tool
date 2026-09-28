@@ -106,7 +106,11 @@ def run_async(coro, timeout=None):
     try:
         return fut.result(timeout)
     except concurrent.futures.TimeoutError:
-        raise IosError("操作超时（%s 秒）" % timeout, "设备可能未响应，重插数据线后重试")
+        # 超时后必须把仍在跑的任务取消掉，否则它永远挂在常驻 loop 上，
+        # 用户每次重试都会再挂一个，设备半掉线时越积越多。
+        fut.cancel()
+        raise IosError("操作超时（%s 秒）" % timeout,
+                       "设备可能未响应：解锁 iPhone 屏幕并重插数据线后重试")
     except IosError:
         raise
     except Exception as e:  # noqa: BLE001 - 统一转成带 hint 的错误
@@ -341,6 +345,186 @@ class Ios:
 
     def device_info(self, udid, timeout=40):
         return run_async(self._device_info(udid), timeout=timeout)
+
+    # ---------------------------------------------------------------- 截屏
+    def screenshot(self, udid, timeout=300):
+        """DVT 单帧截图，返回 PNG 字节。iOS 17+ 需要 tunnel（Windows 不支持）。"""
+        return run_async(self._screenshot(udid), timeout=timeout)
+
+    @staticmethod
+    def _ddi_cache_dir(version):
+        """pmd3 auto_mount 的本地缓存布局；文件存在它就不再联网下载。"""
+        import pathlib
+        return (pathlib.Path.home() / ".pymobiledevice3" / "Xcode.app" / "Contents"
+                / "Developer" / "Platforms" / "iPhoneOS.platform" / "DeviceSupport" / version)
+
+    @staticmethod
+    def _download_ddi(version, dest_dir):
+        """从官方 DDI 仓库下载镜像（多镜像兜底，直连/CDN/代理环境总能命中一个）。"""
+        import requests
+        repos = (
+            "https://raw.githubusercontent.com/doronz88/DeveloperDiskImage/main/DeveloperDiskImages",
+            "https://cdn.jsdelivr.net/gh/doronz88/DeveloperDiskImage@main/DeveloperDiskImages",
+            "https://gh-proxy.com/raw.githubusercontent.com/doronz88/DeveloperDiskImage/main/DeveloperDiskImages",
+        )
+        names = ("DeveloperDiskImage.dmg", "DeveloperDiskImage.dmg.signature")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            # dmg 是几 MB 的镜像，signature 只有 128 字节；按尺寸过滤 4xx 文本 body
+            min_size = 4096 if name.endswith(".dmg") else 1
+            got = False
+            for base in repos:
+                try:
+                    r = requests.get("%s/%s/%s" % (base, version, name), timeout=120)
+                    if r.status_code == 200 and len(r.content) >= min_size:
+                        (dest_dir / name).write_bytes(r.content)
+                        got = True
+                        break
+                except Exception:  # noqa: BLE001 - 换下一个镜像
+                    continue
+            if not got:
+                return False
+        return True
+
+    @staticmethod
+    def _download_ddi_exact(version, dest_dir):
+        """从 iGhibli/iOS-DeviceSupport（Xcode DeviceSupport 归档）下载精确版本。
+
+        老版本 iOS（10.x-13.x）只认同 major.minor 的镜像：实测 11.1.2 设备
+        拒收 11.4 的镜像（挂载后 is_image_mounted 仍为 False），而 doronz88
+        仓库已删掉 11.4 以下的旧镜像。iGhibli 仓库按 Xcode 目录归档了全量
+        老版本（DeviceSupport/{x.y}.zip，内含 dmg + signature）。
+        """
+        import io
+        import zipfile
+
+        import requests
+        bases = (
+            "https://raw.githubusercontent.com/iGhibli/iOS-DeviceSupport/master/DeviceSupport",
+            "https://gh-proxy.com/raw.githubusercontent.com/iGhibli/iOS-DeviceSupport/master/DeviceSupport",
+            "https://cdn.jsdelivr.net/gh/iGhibli/iOS-DeviceSupport@master/DeviceSupport",
+        )
+        for base in bases:
+            try:
+                r = requests.get("%s/%s.zip" % (base, version), timeout=180)
+                # zip 魔数 PK + 尺寸过滤 4xx 文本 body
+                if r.status_code != 200 or len(r.content) < 4096 or r.content[:2] != b"PK":
+                    continue
+                zf = zipfile.ZipFile(io.BytesIO(r.content))
+                names = zf.namelist()
+                dmg = next((n for n in names if n.endswith("DeveloperDiskImage.dmg")), None)
+                sgn = next((n for n in names if n.endswith("DeveloperDiskImage.dmg.signature")), None)
+                if not dmg or not sgn:
+                    continue
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                (dest_dir / "DeveloperDiskImage.dmg").write_bytes(zf.read(dmg))
+                (dest_dir / "DeveloperDiskImage.dmg.signature").write_bytes(zf.read(sgn))
+                return True
+            except Exception:  # noqa: BLE001 - 换下一个镜像
+                continue
+        return False
+
+    @staticmethod
+    def _nearest_ddi_version(version):
+        """仓库没有该精确版本的镜像时，列出版本目录选最接近且不小于它的。"""
+        import requests
+        try:
+            r = requests.get(
+                "https://api.github.com/repos/doronz88/DeveloperDiskImage/contents/DeveloperDiskImages",
+                timeout=60)
+            avail = [x["name"] for x in r.json() if x.get("type") == "dir"]
+        except Exception:  # noqa: BLE001
+            return None
+        if version in avail:
+            return version
+        try:
+            ma, mi = (int(x) for x in version.split(".")[:2])
+        except ValueError:
+            return None
+        same_major = [v for v in avail if v.startswith("%d." % ma) or v == "%d" % ma]
+        pool = same_major or avail
+        higher = sorted((v for v in pool
+                         if tuple(int(x) for x in v.split(".")[:2]) >= (ma, mi)),
+                        key=lambda v: tuple(int(x) for x in v.split(".")[:2]))
+        return higher[0] if higher else None
+
+    async def _ensure_ddi(self, ld):
+        """确保开发者镜像已挂载（screenshotr 等开发者服务依赖它）。
+
+        iOS 上 DDI 重启后即卸载；pmd3 的 auto_mount 会优先用本地缓存
+        （~/.pymobiledevice3/Xcode.app/...），没有才联网下载。失败时按序补刀：
+        1. 精确版本镜像（iGhibli Xcode DeviceSupport 归档）——老 iOS 只认同
+           major.minor 的镜像，就近版本会被设备拒收（11.1.2 拒收 11.4 实测）；
+        2. 就近版本镜像（doronz88 仓库，兜底覆盖 iGhibli 缺失的新版本）。
+        """
+        import logging
+        from pymobiledevice3.services.mobile_image_mounter import (
+            AlreadyMountedError, DeveloperDiskImageMounter, auto_mount)
+
+        mounter = DeveloperDiskImageMounter(lockdown=ld)
+        if await mounter.is_image_mounted("Developer"):
+            return
+        pv = str(ld.product_version or "")
+        ver = ".".join(pv.split(".")[:2]) or pv
+
+        async def remount():
+            try:
+                await auto_mount(ld)
+                return True
+            except AlreadyMountedError:
+                return True
+            except Exception as e:  # noqa: BLE001 - 记录后由调用方继续补刀
+                logging.getLogger(__name__).info("auto_mount retry: %s", e)
+                return False
+
+        try:
+            await auto_mount(ld)
+            return
+        except AlreadyMountedError:
+            return
+        except Exception as e:  # noqa: BLE001 - 下载 404 / 网络失败 / 版本不匹配都进来补刀
+            logging.getLogger(__name__).info("auto_mount fallback: %s", e)
+
+        # 补刀 1：设备精确版本（缓存里可能是别的版本残留，必须覆盖重下）
+        if self._download_ddi_exact(ver, self._ddi_cache_dir(ver)) and await remount():
+            return
+        # 补刀 2：就近版本兜底（老设备多半在上面一步就成功了）
+        nearest = self._nearest_ddi_version(ver)
+        if nearest and nearest != ver \
+                and self._download_ddi(nearest, self._ddi_cache_dir(ver)) and await remount():
+            return
+        raise IosError(
+            "开发者镜像（DDI）自动下载/挂载失败",
+            hint="截屏服务需要先挂载开发者镜像；请检查网络后重试，"
+                 "或手动把 %s 版的 DeveloperDiskImage.dmg(.signature) 放到 %s"
+                 % (nearest or ver, self._ddi_cache_dir(ver)))
+
+    async def _screenshot(self, udid):
+        from pymobiledevice3.exceptions import InvalidServiceError, StartServiceError
+        from pymobiledevice3.lockdown import create_using_usbmux
+        from pymobiledevice3.services.screenshot import ScreenshotService
+
+        ld = await create_using_usbmux(serial=udid)
+        async with ld:
+            async def take():
+                async with ScreenshotService(ld) as sc:
+                    return await sc.take_screenshot()
+
+            try:
+                data = await take()
+            except (InvalidServiceError, StartServiceError):
+                # screenshotr 被拒 = 设备上没有开发者镜像（老 iOS 必需）。
+                # 自动下载 + 挂载后重试一次；重启设备后也会自动重挂。
+                await self._ensure_ddi(ld)
+                data = await take()
+        if isinstance(data, str):
+            data = data.encode("latin-1", "ignore")
+        data = bytes(data or b"")
+        if not data:
+            raise IosError("未拿到截图数据")
+        if not (data.startswith(b"\x89PNG") or data.startswith(b"\xff\xd8")):
+            raise IosError("截图数据不是 PNG/JPEG（iOS 版本行为变化），请反馈")
+        return data
 
     async def _device_info(self, udid):
         from pymobiledevice3.lockdown import create_using_usbmux

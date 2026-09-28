@@ -58,8 +58,9 @@ if APP_ICON:
     print('[spec] app icon: %s' % APP_ICON)
 else:
     print('[spec] app icon: none（config/icon.ico 不存在）')
-_MODULES = ('app', 'api', 'adb', 'logcat', 'labels', 'demo', 'action_log', 'zhdict',
-            'ios', 'ioslog')
+_MODULES = ('app', 'api', 'adb', 'logcat', 'hdc', 'hilog', 'labels', 'demo', 'action_log',
+            'media', 'perf',
+            'zhdict', 'ios', 'ioslog')
 
 # ---------------------------------------------------------------------------
 # iOS 支持（pymobiledevice3）是**可选**依赖：
@@ -155,6 +156,8 @@ a = Analysis(
         ('web', 'web'),
         ('config/android_perms_zh.json', 'config'),
         ('config/android_pkg_names.json', 'config'),
+        # 鸿蒙设备卡片图标（前端经 /config/log.png 访问，本地服务映射到 _MEIPASS/config）
+        ('config/log.png', 'config'),
     ] + clr_dat + pn_dat + ios_dat,
     hiddenimports=(
         # pywebview 按平台动态 import_module('webview.platforms.' + gui)，

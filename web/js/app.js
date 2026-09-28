@@ -11,11 +11,16 @@
 
   var state = {
     route: "devices",
+    // 当前主题。必须在初始 state 里声明：模板里 theme==='dark' 的绑定
+    // 在 applyTheme 从配置读回之前就会求值，缺声明会抛 theme is not defined
+    theme: "dark",
     navs: [
       { key: "devices", label: "设备" },
       { key: "logs", label: "日志查看" },
       { key: "apps", label: "应用包管理" },
-      { key: "files", label: "文件管理" }
+      { key: "files", label: "文件管理" },
+      { key: "perf", label: "性能" },
+      { key: "media", label: "工具与媒体" }
     ],
     currentSerial: "",
     env: { appVersion: "", adbPath: "", adbVersion: "", adbSource: "", demo: false, reason: "" },
@@ -25,9 +30,11 @@
     logs: window.logsComponent(),
     apps: window.appsComponent(),
     files: window.filesComponent(),
+    perf: window.perfComponent(),
+    media: window.mediaComponent(),
 
     toastState: { show: false, text: "", cls: "ok" },
-    settings: { open: false, adbPath: "", detected: "", cocosInspector: "" },
+    settings: { open: false, adbPath: "", detected: "", cocosInspector: "", hdcPath: "" },
     // 中文词库统计。初值带完整结构，避免 v-if/effect 竞争时解引用 undefined（见坑 9）
     zhStats: {
       loaded: false, dir: "", errors: [],
@@ -53,6 +60,17 @@
       return false;
     },
 
+    // 当前选中的是不是鸿蒙（hdc）设备
+    get isHarmony() {
+      var d = this.devices.detail;
+      if (d && d.platform) return d.platform === "harmony";
+      var list = this.devices.list || [];
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].serial === this.currentSerial) return list[i].platform === "harmony";
+      }
+      return false;
+    },
+
     // ---------------------------------------------------------- 初始化
     init: function () {
       var self = this;
@@ -69,6 +87,8 @@
             self.settings.cocosInspector = cfg.cocosInspector || "";
             self.settings.adbPath = cfg.adbPath || "";
             self.settings.detected = cfg.detectedAdbPath || "";
+            self.settings.hdcPath = cfg.hdcPath || "";
+            self.applyTheme(cfg.theme === "light" ? "light" : "dark");
           }
         }).catch(function () {});
       };
@@ -138,6 +158,10 @@
         if (!this.files.storage.ok) this.files.loadStorage(this);
       } else if (key === "logs") {
         if (!this.logs.running) this.logs.start(this);
+      } else if (key === "perf") {
+        this.perf.ensureStarted(this);
+      } else if (key === "media") {
+        this.media.reload(this);
       }
     },
 
@@ -157,6 +181,9 @@
           self.apps.packages = [];
           self.files.entries = [];
           self.files.resetStorage();
+          // 性能采样绑定旧设备，直接停掉；媒体页能力/目录随新设备刷新
+          if (self.perf.running) self.perf.stop(self);
+          self.media.reload(self);
           if (self.route === "apps") self.apps.reload(self);
           if (self.route === "files") {
             self.files.reload(self);
@@ -193,6 +220,21 @@
     },
 
     // ---------------------------------------------------------- 设置
+    // ---------------------------------------------------------- 主题切换
+    applyTheme: function (t) {
+      this.theme = t;
+      try {
+        document.documentElement.dataset.theme = t;
+        localStorage.setItem("adbtool_theme", t);
+      } catch (e) {}
+    },
+    toggleTheme: function () {
+      var t = this.theme === "dark" ? "light" : "dark";
+      this.applyTheme(t);
+      // 持久化到后端配置（跨重启可靠）；localStorage 只负责首帧防闪烁
+      Util.call("set_config", { theme: t }).catch(function () {});
+    },
+
     openSettings: function () {
       var self = this;
       this.settings.open = true;
@@ -200,11 +242,12 @@
       Util.call("get_zh_stats")
         .then(function (s) { if (s) self.zhStats = s; })
         .catch(function () {});
-      return Util.call("get_config")
+      return       Util.call("get_config")
         .then(function (cfg) {
           self.settings.adbPath = (cfg && cfg.adbPath) || "";
           self.settings.detected = (cfg && cfg.detectedAdbPath) || "";
           self.settings.cocosInspector = (cfg && cfg.cocosInspector) || "";
+          self.settings.hdcPath = (cfg && cfg.hdcPath) || "";
         })
         .catch(function (e) {
           self.toast("读取配置失败：" + e.message, "bad");
@@ -214,7 +257,8 @@
       var self = this;
       return Util.call("set_config", {
         adbPath: this.settings.adbPath,
-        cocosInspector: String(this.settings.cocosInspector || "").trim()
+        cocosInspector: String(this.settings.cocosInspector || "").trim(),
+        hdcPath: this.settings.hdcPath
       })
         .then(function (r) {
           self.settings.open = false;
@@ -251,7 +295,7 @@
       this.toast("已接收拖放文件", "ok");
     },
     onNativeDropRejected: function (name) {
-      this.toast("已忽略 " + name + "：仅支持 .apk / .xapk / .apks / .ipa", "warn");
+      this.toast("已忽略 " + name + "：仅支持 .apk / .xapk / .apks / .ipa / .hap", "warn");
     },
 
     // ---------------------------------------------------------- 全局提示

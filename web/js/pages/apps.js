@@ -146,13 +146,17 @@ window.appsComponent = function () {
     get detailFields() {
       var d = this.detail;
       if (!d) return [];
-      // iOS 没有 UID / targetSdk 概念，换成 Bundle 路径等有意义的信息
+      // iOS / 鸿蒙：没有 Android 式的 UID / targetSdk 全套概念，按各自有意义的字段展示
       if (d.permissionsUnsupported) {
-        return [
+        var fields = [
           { label: "类型", value: { user: "用户应用", system: "系统应用" }[d.type] || d.type || "—" },
           { label: "版本", value: (d.versionName || "—") + (d.versionCode ? " (" + d.versionCode + ")" : "") },
-          { label: "Bundle 路径", value: d.codePath || "—", wide: true }
+          { label: (d.entryAbility ? "Bundle 路径" : "Bundle 路径"), value: d.codePath || "—", wide: true }
         ];
+        if (d.entryAbility) {
+          fields.push({ label: "启动入口", value: d.entryAbility });
+        }
+        return fields;
       }
       return [
         { label: "PID", value: d.running ? d.pid : "—" },
@@ -166,18 +170,30 @@ window.appsComponent = function () {
     get permsUnsupported() {
       return !!(this.detail && this.detail.permissionsUnsupported);
     },
+    /* 权限不可用时的说明文案：iOS / 鸿蒙原因不同，别硬套同一句话 */
+    get permsHint() {
+      if (this.isHarmony) {
+        return "HarmonyOS 的权限授予状态在系统设置中管理，bm dump 只提供申请列表，此处不展示以免误导。";
+      }
+      return "iOS 非越狱设备不提供权限列表（需挂载开发者镜像解析 entitlements），此处无法展示。";
+    },
 
     // ---------------------------------------------- 安装弹窗（按平台切换文案）
     get isIos() {
       return !!(window.AdbApp && window.AdbApp.isIos);
     },
+    get isHarmony() {
+      return !!(window.AdbApp && window.AdbApp.isHarmony);
+    },
     get installTitle() {
-      return this.isIos ? "安装 IPA" : "安装 APK";
+      return this.isHarmony ? "安装 HAP" : (this.isIos ? "安装 IPA" : "安装 APK");
     },
     get installDropText() {
-      return this.isIos ? "将 IPA 文件拖放到此处" : "将 APK 文件拖放到此处";
+      return this.isHarmony ? "将 HAP 文件拖放到此处"
+        : (this.isIos ? "将 IPA 文件拖放到此处" : "将 APK 文件拖放到此处");
     },
     get installAccept() {
+      if (this.isHarmony) return "支持 .hap，需设备已开启「开发者模式 - USB 调试」";
       return this.isIos
         ? "支持 .ipa（未签名 / 签名不匹配的安装包会被系统拒绝）"
         : "支持 .apk / .xapk / .apks，单个文件最大 2GB";
@@ -187,6 +203,7 @@ window.appsComponent = function () {
       var d = app && app.devices ? app.devices.detail : null;
       if (d) {
         if (d.platform === "ios") return d.model + " · iOS " + (d.iosVersion || "—");
+        if (d.platform === "harmony") return d.model + " · HarmonyOS " + (d.osVersion || "—");
         return d.model + " · " + (d.displayId || "") + " · Android " + (d.androidVersion || "—");
       }
       // 详情未加载时从设备列表兜底；当前序列号匹配不上（未选/刚插上/列表过期）
@@ -200,6 +217,7 @@ window.appsComponent = function () {
       }
       if (hit) {
         if (hit.platform === "ios") return (hit.model || "iPhone") + " · iOS " + (hit.iosVersion || "—");
+        if (hit.platform === "harmony") return (hit.model || "HarmonyOS") + " · HarmonyOS";
         return (hit.model || "Android") + " · " + (hit.displayId || hit.serial);
       }
       return "—";
@@ -246,7 +264,7 @@ window.appsComponent = function () {
       // 会话，而返回的字典里 application_type=Any 已经覆盖全部应用且自带 system/user
       // 类型 —— 拆成 all/system/disabled 三次调用只是把等待时间翻三倍
       // （之前"同步包列表"转很久最后还失败，列表就一直是旧的）。
-      var calls = app.isIos
+      var calls = (app.isIos || app.isHarmony)
         ? [Util.call("list_packages", app.currentSerial, "all")]
         : [
           Util.call("list_packages", null, "all"),
@@ -267,13 +285,14 @@ window.appsComponent = function () {
           if (!all.length && self.loadError) return;
           var sysSet = {};
           var disSet = {};
-          if (!app.isIos) {
+          if (!app.isIos && !app.isHarmony) {
             ((res[1] && res[1].packages) || []).forEach(function (p) { sysSet[p.packageName] = 1; });
             ((res[2] && res[2].packages) || []).forEach(function (p) { disSet[p.packageName] = 1; });
           }
           self.packages = all.map(function (p) {
-            // iOS 非越狱拿不到"已禁用"状态，类型直接用设备返回的 system/user
-            var type = app.isIos
+            // iOS 非越狱拿不到"已禁用"状态，类型直接用设备返回的 system/user；
+            // 鸿蒙 bm dump -a 只有包名，统一按三方应用展示
+            var type = (app.isIos || app.isHarmony)
               ? (p.type === "system" ? "system" : "third")
               : (disSet[p.packageName] ? "disabled"
                 : (sysSet[p.packageName] || p.type === "system" ? "system" : "third"));
@@ -435,10 +454,11 @@ window.appsComponent = function () {
     pickApk: function (app) {
       var self = this;
       var ios = this.isIos;
-      var title = ios ? "选择 IPA 文件" : "选择 APK 文件";
-      var types = ios
-        ? ["IPA 文件 (*.ipa)"]
-        : ["APK 文件 (*.apk;*.xapk;*.apks)"];
+      var harmony = this.isHarmony;
+      var title = harmony ? "选择 HAP 文件" : (ios ? "选择 IPA 文件" : "选择 APK 文件");
+      var types = harmony
+        ? ["HAP 文件 (*.hap)"]
+        : (ios ? ["IPA 文件 (*.ipa)"] : ["APK 文件 (*.apk;*.xapk;*.apks)"]);
       return Util.call("choose_file", title, types, false)
         .then(function (res) {
           var p = Array.isArray(res) ? res[0] : res;
@@ -455,7 +475,8 @@ window.appsComponent = function () {
     doInstall: function (app) {
       var self = this;
       if (!this.installFile) {
-        app.toast(this.isIos ? "请先选择 IPA 文件" : "请先选择 APK 文件", "warn");
+        var kindText = this.isHarmony ? "HAP" : (this.isIos ? "IPA" : "APK");
+        app.toast("请先选择 " + kindText + " 文件", "warn");
         return;
       }
       // 显式带上序列号：后端 current_serial 可能与前端选中不一致

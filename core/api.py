@@ -21,6 +21,8 @@ import subprocess
 
 from .adb import Adb, IS_WIN, _no_window
 from .logcat import LogcatSession, DemoLogcatSession
+from .hdc import Hdc
+from .hilog import HilogSession
 from .ios import Ios, IosError, IosUnavailable, _as_text
 from .ioslog import IosLogSession
 from . import demo, action_log
@@ -37,8 +39,9 @@ def _repo_display_version():
     """源码运行时（run.bat / python main.py）界面上显示的版本号。
 
     仓库里的 APP_VERSION 只由 CI 在 runner 上改写、**不回写仓库**，所以本地会一直
-    停在旧值（2.7.0），跟 GitHub Release 上的包对不上。这里直接问 git 要「最近一次
-    发布的 tag」——本地 clone 里就有这个 tag，不用联网，也不写文件（不动工作区）。
+    停在旧值（2.7.0）。这里直接问 git 要「最近一次发布的 tag」，再按 CI 的同款
+    规则 **patch +1**——显示的是「本次开发的版本」，与 ci_version.sh / 本地
+    pyd_pack 打出来的包一致：上一个发布是 v2.7.4 时，本地就显示 2.7.5。
     取不到（没装 git / 不在仓库里 / 超时）就退回 APP_VERSION。
     """
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -50,7 +53,11 @@ def _repo_display_version():
         )
         tag = (p.stdout or "").strip()
         if p.returncode == 0 and tag.startswith("v") and tag[1:2].isdigit():
-            return tag[1:]
+            base = tag[1:].split("-", 1)[0]  # 剥离历史遗留的 -b<run号> 后缀
+            parts = base.split(".")
+            if len(parts) == 3 and all(x.isdigit() for x in parts):
+                parts[2] = str(int(parts[2]) + 1)
+                return ".".join(parts)
     except Exception:  # noqa: BLE001 - 版本号拿不到不该影响启动
         pass
     return APP_VERSION
@@ -67,12 +74,24 @@ UDID_RE = re.compile(r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{16}|[0-9a-fA-F]{40}|[0-9a-
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".adb_tool", "config.json")
 DEFAULT_CONFIG = {
     "adbPath": "",
+    "hdcPath": "",
     "logBufferDefault": "main",
     "pageSize": 20,
     # Cocos Creator 原生应用的 V8 Inspector 地址，如 172.17.224.90:6086。
     # 留空时只抓 iOS Unified Logging。
     "cocosInspector": "",
+    # UI 主题：dark | light（右上角按钮切换）
+    "theme": "dark",
+    # 连接过的设备历史（左侧"历史设备"），最多保留 50 条：
+    # [{serial, model, platform, transport, lastSeen}]
+    "deviceHistory": [],
+    # 被 ✕ 移除的设备 serial：持久化，重启后仍隐藏；
+    # 设备重新上线（state=device）时自动移出该表恢复显示
+    "hiddenDevices": [],
 }
+
+# 纯血鸿蒙 shell 可见的用户存储根（没有 /sdcard，文件页把 /sdcard 映射到这里）
+HAR_ROOT = "/storage/data/local"
 
 
 def load_config():
@@ -135,14 +154,26 @@ class Api:
         # iOS 后端（pymobiledevice3，可选依赖）。没装时 available() 返回 False，
         # 所有 iOS 分支都会给出安装提示，不会静默失败。
         self.ios = Ios()
-        # serial -> 'android' | 'ios'，由 refresh_env / list_devices 刷新
+        # 纯血鸿蒙（HarmonyOS NEXT）后端：hdc 命令封装，找不到 hdc 时设备列表
+        # 只是少了鸿蒙设备，不影响 Android / iOS。
+        self.hdc = Hdc(self.config.get("hdcPath") or None)
+        # 媒体工具（截屏/录屏/媒体库）与性能采样，平台能力见各自模块 docstring
+        from .media import MediaManager
+        from .perf import PerfMonitor
+        self.media = MediaManager(self)
+        self.perf = PerfMonitor(self)
+        # serial -> 'android' | 'ios' | 'harmony'，由 refresh_env / list_devices 刷新
         self._platforms = {}
         self._ios_devices = []
+        self._harmony_devices = []
         self.session = None
         self._storage_cache = None
         self._storage_scanning = False
         self.demo = False
         self.current_serial = None
+        # 被 ✕ 移除的设备（持久化到 config.json，重启仍生效）；
+        # 设备重新上线自动恢复显示
+        self._hidden = set(self.config.get("hiddenDevices") or [])
         self.tasks = {}
         self._tid = 0
         self._lock = threading.RLock()
@@ -170,19 +201,84 @@ class Api:
             "iosLibVersion": "",
             "iosReason": "",
             "iosCount": 0,
+            # 鸿蒙侧：hdc 是否找到、版本、路径来源
+            "hdcFound": False,
+            "hdcPath": "",
+            "hdcVersion": "",
+            "hdcSource": "",
+            "harmonyCount": 0,
         }
 
     # =================================================================== 环境
     # ------------------------------------------------------- 平台判定与守卫
     def _platform_of(self, serial=None):
-        """判定设备平台。优先用探测时缓存的映射，未命中再按 UDID 形态猜。"""
+        """判定设备平台。优先用探测时缓存的映射，未命中再查设备缓存 / 主动补探。"""
         serial = serial or self.current_serial
         if not serial:
             return "android"
         p = self._platforms.get(serial)
-        if p in ("android", "ios"):
+        if p in ("android", "ios", "harmony"):
             return p
+        # 映射缺失（如设备在 refresh_env 之后才接入）时查实时设备缓存兜底
+        for d in self._harmony_devices:
+            if d.get("serial") == serial:
+                self._platforms[serial] = "harmony"
+                return "harmony"
+        for d in self._ios_devices:
+            if d.get("serial") == serial:
+                self._platforms[serial] = "ios"
+                return "ios"
+        # 缓存里也没有：主动补探一次 hdc / adb（hdc 很快；iOS 靠 UDID 形态兜底，
+        # 不主动跑 pmd3 探测——最坏要等 25s）
+        if not self._harmony_devices and self.hdc.exists()[0]:
+            try:
+                self._harmony_devices = self.hdc.devices() or []
+            except Exception:  # noqa: BLE001
+                self._harmony_devices = []
+            for d in self._harmony_devices:
+                if d.get("serial") == serial:
+                    self._platforms[serial] = "harmony"
+                    return "harmony"
+        if serial not in self._platforms and self.adb.exists()[0]:
+            try:
+                for d in self.adb.devices():
+                    if d.get("serial") == serial:
+                        self._platforms[serial] = "android"
+                        return "android"
+            except Exception:  # noqa: BLE001
+                pass
         return "ios" if UDID_RE.match(serial) else "android"
+
+    def _harmony_guard(self):
+        """hdc 不可用时的统一错误（前端直接展示 hint）。"""
+        ok, _ = self.hdc.exists()
+        if not ok:
+            return {"ok": False,
+                    "error": "未检测到 hdc（纯血鸿蒙设备需要 hdc 连接）",
+                    "hint": "安装 DevEco Studio，或把 hdc 放到 public_settings/hdc/ 目录"}
+        return None
+
+    # ---------------------------------------------------------- 文件操作辅助
+    @staticmethod
+    def _har_path(path):
+        """鸿蒙没有 /sdcard：把 /sdcard 前缀映射到 shell 可见的用户存储根。"""
+        p = path or "/sdcard"
+        if p == "/sdcard":
+            return HAR_ROOT
+        if p.startswith("/sdcard/"):
+            return HAR_ROOT + p[len("/sdcard"):]
+        return p
+
+    def _sh(self, cmd, serial=None, timeout=30):
+        """文件类 shell 统一入口：鸿蒙走 hdc，其余走 adb。命令字符串两边同构。"""
+        if self._platform_of(serial) == "harmony":
+            return self.hdc.shell(cmd, target=serial, timeout=timeout)
+        return self.adb.shell(cmd, serial=serial, timeout=timeout)
+
+    def _stat_size(self, serial, path):
+        if self._platform_of(serial) == "harmony":
+            return self.hdc.stat_size(serial, path)
+        return self.adb.stat_size(serial, path)
 
     def _ios_guard(self):
         """pymobiledevice3 不可用时的统一错误（前端直接展示 hint）。"""
@@ -223,19 +319,34 @@ class Api:
                 ios_reason = getattr(e, "msg", str(e))
         ios_online = [d for d in ios_devs if d["state"] == "device"]
 
+        # --- 鸿蒙（hdc）探测：hdc 缺失只是"没有鸿蒙设备"，不影响 Android / iOS
+        hdc_ok, _ = self.hdc.exists()
+        hdc_ver = ""
+        harmony_devs = []
+        if hdc_ok:
+            hdc_ver = self.hdc.version()
+            try:
+                harmony_devs = self.hdc.devices() or []
+            except Exception as e:  # noqa: BLE001 - 探测失败不阻断其他平台
+                harmony_devs = []
+        harmony_online = [d for d in harmony_devs if d["state"] == "device"]
+
         self._platforms = {d["serial"]: "android" for d in devices}
         self._platforms.update({d["serial"]: "ios" for d in ios_devs})
+        self._platforms.update({d["serial"]: "harmony" for d in harmony_devs})
         self._ios_devices = ios_devs
+        self._harmony_devices = harmony_devs
 
         # 演示模式**只在用户显式开启时进入**（enable_demo），不再自动回退——
         # 没接手机就显示假设备会误导排查。有真机上线时自动退出演示模式。
-        if online or ios_online:
+        if online or ios_online or harmony_online:
             self.demo = False
-        all_online = online + ios_online
-        if not (found or ios_ok):
-            reason = "未检测到 adb 与 iOS 支持：可在设置中指定 adb 路径（macOS 安装包已内置 adb）"
+        all_online = online + ios_online + harmony_online
+        if not (found or ios_ok or hdc_ok):
+            reason = "未检测到 adb / hdc 与 iOS 支持：可在设置中指定 adb、hdc 路径（macOS 安装包已内置 adb）"
         elif not all_online:
-            reason = "未检测到已授权设备：请检查 USB 调试开关 / 数据线 / 「信任此电脑」"
+            reason = ("未检测到已授权设备：Android 请检查 USB 调试开关 / 数据线 / 「信任此电脑」；"
+                      "鸿蒙请打开「开发者模式 - USB 调试」")
         else:
             reason = ""
         self.env.update(
@@ -247,6 +358,9 @@ class Api:
             demo=self.demo,
             iosAvailable=ios_ok, iosLibVersion=ios_ver, iosReason=ios_reason,
             iosCount=len(ios_online),
+            hdcFound=hdc_ok, hdcPath=self.hdc.path, hdcVersion=hdc_ver,
+            hdcSource=getattr(self.hdc, "source", "unknown"),
+            harmonyCount=len(harmony_online),
             reason=reason,
         )
         if all_online:
@@ -297,7 +411,137 @@ class Api:
         for d in self._ios_devices:
             d["platform"] = "ios"
             out.append(d)
-        return out
+        # 鸿蒙：缓存为空且 hdc 可用时重探一次（与 iOS 同策略）
+        if not self._harmony_devices and self.hdc.exists()[0]:
+            try:
+                self._harmony_devices = self.hdc.devices() or []
+            except Exception:  # noqa: BLE001
+                self._harmony_devices = []
+        for d in self._harmony_devices:
+            d["platform"] = "harmony"
+            out.append(d)
+        # 平台映射必须在这里同步回写：设备可能是程序启动后才插上的，
+        # refresh_env 只在启动/手动刷新时跑一次；性能采样等处靠
+        # _platform_of() 判平台，漏写会把鸿蒙设备当 Android 采样（全空）。
+        self._platforms = {d["serial"]: d["platform"] for d in out}
+        # ✕ 移除过的设备：不在线就继续隐藏；重新上线（重新授权）恢复显示
+        visible = []
+        unhidden = False
+        for d in out:
+            if d["serial"] in self._hidden:
+                if d.get("state") == "device":
+                    self._hidden.discard(d["serial"])   # 回归在线，取消隐藏
+                    unhidden = True
+                else:
+                    continue
+            visible.append(d)
+        if unhidden:
+            self.config["hiddenDevices"] = sorted(self._hidden)
+            save_config(self.config)
+        self._record_history(visible)
+        return visible
+
+    # ------------------------------------------------------------- 设备历史
+    HISTORY_MAX = 50
+
+    def _record_history(self, devices):
+        """把本次枚举到的设备并入历史（按 lastSeen 倒序，去重、封顶）。
+
+        历史落在 config.json（~/.adb_tool/config.json），重启后仍在。
+        只有内容变化才写盘，避免高频刷新带来无谓 IO。
+        """
+        try:
+            hist = list(self.config.get("deviceHistory") or [])
+            by_serial = {h.get("serial"): h for h in hist}
+            now = time.strftime("%Y-%m-%d %H:%M:%S")
+            changed = False
+            for d in devices:
+                serial = d.get("serial")
+                if not serial or d.get("platform") == "demo":
+                    continue
+                h = by_serial.get(serial)
+                if h is None:
+                    h = {"serial": serial, "model": "", "platform": "android",
+                         "transport": "usb", "lastSeen": now}
+                    hist.insert(0, h)
+                    by_serial[serial] = h
+                    changed = True
+                if d.get("model") and d["model"] != h.get("model"):
+                    h["model"] = d["model"]
+                    changed = True
+                if d.get("platform") and d["platform"] != h.get("platform"):
+                    h["platform"] = d["platform"]
+                    changed = True
+                if d.get("transport") and d["transport"] != h.get("transport"):
+                    h["transport"] = d["transport"]
+                    changed = True
+                if h.get("lastSeen") != now:
+                    h["lastSeen"] = now
+                    changed = True
+            if len(hist) > self.HISTORY_MAX:
+                hist = hist[:self.HISTORY_MAX]
+                changed = True
+            if changed:
+                self.config["deviceHistory"] = hist
+                save_config(self.config)
+        except Exception:  # noqa: BLE001 - 历史记录失败不影响设备列表
+            pass
+
+    def device_history(self):
+        """历史设备列表（不含当前仍在线的，前端会把在线的过滤掉）。"""
+        return list(self.config.get("deviceHistory") or [])
+
+    def remove_device_history(self, serial):
+        """删除一条历史记录；serial 传 "*" 清空全部。"""
+        hist = list(self.config.get("deviceHistory") or [])
+        if serial == "*":
+            hist = []
+        else:
+            hist = [h for h in hist if h.get("serial") != serial]
+        self.config["deviceHistory"] = hist
+        save_config(self.config)
+        return {"ok": True, "count": len(hist)}
+
+    def remove_device(self, serial):
+        """从左侧列表移除设备。
+
+        - 无线地址（ip:port）：hdc tdisconnect + adb disconnect 双通道都试，
+          哪个通道连的用哪个断，另一个失败无副作用（hdc 部分版本没有
+          tdisconnect 命令，断不开也无妨，靠下面的隐藏表兜底）
+        - 离线/断不开的设备（hdc/adb 仍会枚举）：加入隐藏表并持久化到
+          config.json，重启后仍隐藏；设备重新上线（state=device）时自动
+          恢复显示
+        - 同步删除历史记录；若是当前选中设备则清空选中
+        """
+        if not serial:
+            return {"ok": False, "error": "缺少 serial"}
+        outputs = []
+        if re.match(r"^\d{1,3}(\.\d{1,3}){3}:\d+$", serial):
+            hok, _ = self.hdc.exists()
+            if hok:
+                r = self.hdc.tdisconnect(serial)
+                outputs.append("[hdc] " + ((r["stdout"] or r["stderr"]).strip() or
+                                 ("已断开" if r["ok"] else "无此连接")))
+            try:
+                r = self.adb.run(["disconnect", serial], timeout=10)
+                outputs.append("[adb] " + ((r["stdout"] or r["stderr"]).strip() or
+                               ("已断开" if r["ok"] else "无此连接")))
+            except Exception as e:  # noqa: BLE001 - adb 侧失败不阻断移除
+                outputs.append("[adb] %s" % e)
+        self._hidden.add(serial)
+        self.config["hiddenDevices"] = sorted(self._hidden)
+        save_config(self.config)
+        self._harmony_devices = [d for d in self._harmony_devices
+                                 if d.get("serial") != serial]
+        self._ios_devices = [d for d in self._ios_devices
+                             if d.get("serial") != serial]
+        self._platforms.pop(serial, None)
+        if self.current_serial == serial:
+            self.current_serial = None
+        self.remove_device_history(serial)
+        action_log.record("remove_device", "remove %s" % serial,
+                          serial=serial, ok=True, output="; ".join(outputs))
+        return {"ok": True, "output": "\n".join(outputs)}
 
     def get_device_detail(self, serial=None):
         serial = serial or self.current_serial
@@ -311,6 +555,11 @@ class Api:
                 return self.ios.device_info(serial)
             except Exception as e:  # noqa: BLE001
                 return self._ios_err("device_info", e)
+        if self._platform_of(serial) == "harmony":
+            guard = self._harmony_guard()
+            if guard:
+                return guard
+            return self._harmony_device_detail(serial)
         props = self.adb.getprops(serial) or {}
         bat = self.adb.battery(serial)
         kernel = self.adb.kernel(serial)
@@ -332,26 +581,181 @@ class Api:
         }
         return device
 
+    def _harmony_device_detail(self, serial):
+        """鸿蒙设备详情：param get 系统属性（等价 Android getprops）。
+
+        未授权/离线时 param 全会失败（hdc exit code 0 + [Fail] 文本），
+        先探测一把，直接给出人话错误，不让错误串污染型号等字段。
+        """
+        probe = self.hdc.shell("param get const.product.model",
+                               target=serial, timeout=8)
+        if not (probe["ok"] and probe["stdout"].strip()):
+            blob = ((probe["stdout"] or "") + (probe["stderr"] or "")).lower()
+            if "unauthorized" in blob:
+                return {"serial": serial, "platform": "harmony",
+                        "state": "unauthorized",
+                        "error": "设备未授权：请解锁手机，在弹出的「允许 hdc 调试」"
+                                 "对话框点允许（建议勾选始终允许）；"
+                                 "没看到弹窗就拔插一次 USB 线"}
+            if "e001005" in blob or "not found or connected" in blob:
+                return {"serial": serial, "platform": "harmony",
+                        "state": "offline",
+                        "error": "设备已枚举但通信未建立：请在手机上关闭再打开「USB 调试」，"
+                                 "拔插 USB 线并允许 hdc 调试弹窗；无效则重启手机后重试"}
+            return {"serial": serial, "platform": "harmony",
+                    "state": "offline",
+                    "error": "设备通信失败：" +
+                             ((probe["stdout"] or probe["stderr"] or "").strip()[:160] or "未知错误")}
+        model = self.hdc.param("const.product.model", target=serial)
+        name = self.hdc.param("const.product.name", target=serial)
+        brand = self.hdc.param("const.product.brand", target=serial)
+        os_ver = self.hdc.param("const.product.software.version", target=serial)
+        api_level = self.hdc.param("const.ohos.apiversion", target=serial)
+        display = self.hdc.param("const.product.devicetype", target=serial)
+        return {
+            "serial": serial,
+            "platform": "harmony",
+            "model": model or name or serial,
+            "device": display,
+            "brand": brand,
+            "osVersion": os_ver,
+            "apiLevel": api_level,
+            "battery": {"level": None, "status": "", "powered": False, "charging": False},
+            "state": "device",
+            "props": {},
+        }
+
     def select_device(self, serial):
         self.current_serial = serial
         self.stop_logcat()
         action_log.record("select_device", "adb -s %s ..." % serial, serial=serial, ok=True)
         return {"ok": True, "serial": serial}
 
+    # ------------------------------------------------------------------ 媒体
+    def media_capabilities(self):
+        return self.media.capabilities()
+
+    def media_screenshot(self, save_to_device=False, copy_clipboard=False):
+        return self.media.screenshot(save_to_device, copy_clipboard)
+
+    def media_record_start(self, opts=None):
+        return self.media.record_start(opts)
+
+    def media_record_stop(self):
+        return self.media.record_stop()
+
+    def media_record_status(self):
+        return self.media.record_status()
+
+    def media_list(self, keyword=""):
+        return self.media.list_files(keyword)
+
+    def media_open(self, name):
+        return self.media.open_file(name)
+
+    def media_delete(self, name):
+        return self.media.delete_file(name)
+
+    def media_rename(self, old, new):
+        return self.media.rename_file(old, new)
+
+    def media_save_as(self, name):
+        return self.media.save_as(name)
+
+    # ------------------------------------------------------------------ 性能
+    def perf_start(self, opts=None):
+        return self.perf.start(opts)
+
+    def perf_stop(self):
+        return self.perf.stop()
+
+    def perf_status(self, after=0):
+        return self.perf.status(after or 0)
+
+    def perf_export(self):
+        return self.perf.export_data()
+
+    def perf_import(self):
+        return self.perf.import_data()
+
+    def perf_trace_start(self):
+        return self.perf.trace_start()
+
+    def perf_trace_stop(self):
+        return self.perf.trace_stop()
+
     def connect_wireless(self, addr):
         if self.demo:
             action_log.record("connect", "adb connect %s" % addr, ok=True, output="演示模式")
             return {"ok": True, "output": "演示模式：模拟连接 %s" % addr}
+        # 鸿蒙当前设备 / adb 连不上且 hdc 可用 -> 走 hdc tconn（无线调试）
+        if self._platform_of() == "harmony":
+            r = self.hdc.tconn(addr)
+            action_log.record("connect", r["cmd"], exit_code=r["exitCode"],
+                              output=r["stdout"] or r["stderr"], ok=r["ok"])
+            return {"ok": r["ok"], "output": (r["stdout"] or r["stderr"]).strip()}
         r = self.adb.run(["connect", addr], timeout=20)
-        action_log.record("connect", r["cmd"], exit_code=r["exitCode"],
-                          output=r["stdout"] or r["stderr"], ok=r["ok"])
-        return {"ok": r["ok"], "output": (r["stdout"] or r["stderr"]).strip()}
+        ok, out = r["ok"], (r["stdout"] or r["stderr"]).strip()
+        # adb 连不上时兜底试 hdc：用户不知道手里的鸿蒙机该走哪个通道
+        if not ok:
+            hok, _ = self.hdc.exists()
+            if hok:
+                hr = self.hdc.tconn(addr)
+                hout = (hr["stdout"] or hr["stderr"]).strip()
+                action_log.record("connect", hr["cmd"], exit_code=hr["exitCode"],
+                                  output=hout, ok=hr["ok"])
+                return {"ok": hr["ok"], "output": out + "\n[hdc] " + hout if out else hout}
+        action_log.record("connect", r["cmd"], exit_code=r["exitCode"], output=out, ok=ok)
+        return {"ok": ok, "output": out}
 
     def disconnect_wireless(self, addr):
         if self.demo:
             return {"ok": True, "output": "演示模式"}
+        if self._platform_of() == "harmony":
+            r = self.hdc.tdisconnect(addr)
+            return {"ok": r["ok"], "output": (r["stdout"] or r["stderr"]).strip()}
         r = self.adb.run(["disconnect", addr], timeout=20)
         return {"ok": r["ok"], "output": (r["stdout"] or r["stderr"]).strip()}
+
+    @staticmethod
+    def _parse_wlan_ip(text):
+        m = re.search(r"inet (?:addr:)?(\d+\.\d+\.\d+\.\d+)", text or "")
+        if not m or m.group(1).startswith("127."):
+            return ""
+        return m.group(1)
+
+    def enable_wireless(self, port=None):
+        """USB 在线时把设备切到无线监听（鸿蒙 tmode / Android tcpip），并探测设备 IP。"""
+        serial = self.current_serial
+        if not serial:
+            return {"ok": False, "output": "未选择设备"}
+        if self.demo:
+            return {"ok": True, "ip": "192.168.1.100", "port": 10123,
+                    "output": "演示模式：已切换无线监听"}
+        platform = self._platform_of(serial)
+        if platform == "ios":
+            return {"ok": False, "output": "iOS 不支持 ADB/hdc 无线切换（走 AirPlay 局域网镜像）"}
+        try:
+            port = int(port) if port else 0
+        except (TypeError, ValueError):
+            port = 0
+        if platform == "harmony":
+            port = port or 10123
+            # 先查 IP 再 tmode：tmode 生效后 USB 会话会断开
+            ip = self._parse_wlan_ip(
+                (self.hdc.shell("ifconfig wlan0", target=serial, timeout=10)["stdout"]))
+            if not ip:
+                ip = self._parse_wlan_ip(
+                    (self.hdc.shell("ip addr show wlan0", target=serial, timeout=10)["stdout"]))
+            r = self.hdc.tmode(serial, port)
+        else:
+            port = port or 5555
+            r = self.adb.run(["tcpip", str(port)], serial=serial, timeout=15)
+            ip = self._parse_wlan_ip(
+                (self.adb.run(["shell", "ip -f inet addr show wlan0"],
+                              serial=serial, timeout=10)["stdout"]))
+        out = (r["stdout"] or r["stderr"]).strip()
+        return {"ok": r["ok"], "ip": ip, "port": port, "output": out}
 
     def get_pid_map(self, serial=None):
         serial = serial or self.current_serial
@@ -360,6 +764,9 @@ class Api:
             m = {}
         elif self._platform_of(serial) == "ios":
             m = self.ios.pid_map(serial) or {}
+        elif self._platform_of(serial) == "harmony":
+            guard = self._harmony_guard()
+            m = self.hdc.pid_map(serial) if not guard else {}
         else:
             m = self.adb.pid_map(serial)
         # 顺带给出中文映射（android_pkg_names 命中的才有值，native 进程回落 None）
@@ -388,6 +795,8 @@ class Api:
                 if name in cands:
                     return {"pid": pid}
             return {"pid": None}
+        if self._platform_of(serial) == "harmony":
+            return {"pid": self.hdc.pidof(serial, package)}
         return {"pid": self.adb.pidof(serial, package)}
 
     # =================================================================== 日志
@@ -407,12 +816,24 @@ class Api:
             self.session = IosLogSession(
                 self.ios, cocos_inspector=inspector, pkg=pkg
             )
+        elif self._platform_of(serial) == "harmony":
+            guard = self._harmony_guard()
+            if guard:
+                return {"ok": False, "error": guard["error"], "hint": guard.get("hint", ""),
+                        "serial": serial, "buffer": buffer}
+            # 鸿蒙走 hilog（buffer 参数不适用，hilog 是单一流）
+            self.session = HilogSession(self.hdc)
         else:
             self.session = LogcatSession(self.adb)
         ok = self.session.start(serial, buffer)
-        is_ios = self._platform_of(serial) == "ios"
-        cmd = ("ios syslog -s %s" % serial) if is_ios else (
-            "adb -s %s logcat -v threadtime -b %s" % (serial, buffer))
+        plat = self._platform_of(serial)
+        is_ios = plat == "ios"
+        if is_ios:
+            cmd = "ios syslog -s %s" % serial
+        elif plat == "harmony":
+            cmd = "hdc -t %s shell hilog" % serial
+        else:
+            cmd = "adb -s %s logcat -v threadtime -b %s" % (serial, buffer)
         action_log.record("logcat_start", cmd, serial=serial, ok=ok,
                           output=("" if ok else self.session.error))
         out = {"ok": ok, "error": self.session.error, "serial": serial, "buffer": buffer}
@@ -558,6 +979,33 @@ class Api:
                 return {"ok": True, "packages": self.ios.list_packages(serial, kind)}
             except Exception as e:  # noqa: BLE001
                 return dict(self._ios_err("list_packages", e), packages=[])
+        if self._platform_of(serial) == "harmony":
+            guard = self._harmony_guard()
+            if guard:
+                return dict(guard, packages=[])
+            # bm dump -a 只给 bundle 名列表；应用名/体积要逐个 bm dump -n（慢），
+            # 列表页先出包名，详情弹窗再查具体信息
+            pkgs, r = self.hdc.bm_list(serial)
+            if not r["ok"]:
+                return {"ok": False, "error": r["stderr"] or r["stdout"], "packages": []}
+            pmap = self.hdc.pid_map(serial)
+            running = {}
+            for pid, name in pmap.items():
+                running[name] = pid
+            out = []
+            for pkg in pkgs:
+                pid = running.get(pkg, 0)
+                out.append({
+                    "packageName": pkg,
+                    "label": "",
+                    "codePath": "",
+                    "versionName": "",
+                    "type": "",
+                    "sizeBytes": 0,
+                    "running": bool(pid),
+                    "pid": pid,
+                })
+            return {"ok": True, "packages": out}
         # with_path=True 一次拿到 base.apk 路径，供应用名解析（避免 per-app dumpsys）
         pkgs, r = self.adb.list_packages(serial, kind, with_path=True)
         if not r["ok"]:
@@ -641,6 +1089,9 @@ class Api:
             self.adb = Adb(self.config.get("adbPath") or None)
             self.labels = labels_mod.LabelResolver(self.adb)
             self.refresh_env()
+        if "hdcPath" in (patch or {}):
+            self.hdc = Hdc(self.config.get("hdcPath") or None)
+            self.refresh_env()
         return {"ok": ok, "config": self.get_config()}
 
     def get_app_detail(self, package, serial=None):
@@ -657,6 +1108,11 @@ class Api:
                 return {"ok": True, "detail": self.ios.app_detail(serial, package)}
             except Exception as e:  # noqa: BLE001
                 return self._ios_err("app_detail", e)
+        if self._platform_of(serial) == "harmony":
+            guard = self._harmony_guard()
+            if guard:
+                return guard
+            return self._harmony_app_detail(serial, package)
         info, r = self.adb.dump_package(serial, package)
         if not r["ok"]:
             return {"ok": False, "error": r["stderr"] or r["stdout"]}
@@ -690,6 +1146,70 @@ class Api:
         detail["sizeBytes"] = detail["appSize"] + detail["dataSize"] + detail["cacheSize"]
         return {"ok": True, "detail": detail}
 
+    def _harmony_app_detail(self, serial, package):
+        """鸿蒙应用详情：bm dump -n 解析（新版 JSON / 老版 key-value 都兜）。"""
+        dump, r = self.hdc.bm_dump(serial, package)
+        if r["ok"] and not dump:
+            # 非 JSON 输出：未安装或老版本，报错给前端
+            if "Failure" in r["stdout"] or "fail" in r["stdout"].lower():
+                return {"ok": False, "error": "未找到应用 %s" % package}
+        if not dump:
+            dump = {}
+        app = dump.get("application") or {}
+        version_name = app.get("appVersionName", "")
+        version_code = app.get("appVersionCode", "")
+        code_path = app.get("codePath", "") or dump.get("appIdentifier", "")
+        is_pre = app.get("isPreInstallApp")
+        if is_pre is None:
+            is_pre = dump.get("isPreInstallApp")
+        typ = "system" if is_pre else "third"
+        pid = self.hdc.pidof(serial, package)
+        abilities = [a.get("name", "") for a in (dump.get("abilityInfos") or [])
+                     if a.get("name")]
+        install_time = dump.get("installTime") or ""
+        update_time = dump.get("updateTime") or ""
+        fmt_ms = lambda v: (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(v) / 1000))
+                            if str(v).isdigit() and int(v) > 0 else str(v or ""))
+        detail = {
+            "packageName": package,
+            "label": "",
+            "versionName": str(version_name or ""),
+            "versionCode": str(version_code or ""),
+            "type": typ,
+            "uid": dump.get("uid", "") or "",
+            "targetSdk": "",
+            "running": pid is not None,
+            "pid": pid or 0,
+            "enabled": True,
+            "codePath": code_path,
+            "dataDir": app.get("dataBaseDir", ""),
+            "firstInstallTime": fmt_ms(install_time),
+            "lastUpdateTime": fmt_ms(update_time),
+            "appSize": 0,
+            "dataSize": 0,
+            "cacheSize": 0,
+            "sizeBytes": 0,
+            "entryAbility": abilities[0] if abilities else "",
+            "abilities": abilities,
+            # 鸿蒙的运行时授权状态在系统设置里，bm dump 只有申请列表，
+            # 展示"未授予"会误导，前端按 unsupported 走说明文案
+            "permissions": [],
+            "granted": 0,
+            "requested": 0,
+            "permissionsUnsupported": True,
+        }
+        return {"ok": True, "detail": detail}
+
+    def _harmony_entry_ability(self, serial, package):
+        """启动应用需要的 ability 名：bm dump 解析，失败退回常见默认名。"""
+        try:
+            d = self._harmony_app_detail(serial, package)
+            if d.get("ok") and d["detail"].get("entryAbility"):
+                return d["detail"]["entryAbility"]
+        except Exception:  # noqa: BLE001
+            pass
+        return "EntryAbility"
+
     def app_action(self, package, action, serial=None):
         serial = serial or self.current_serial
         cmds = {
@@ -702,6 +1222,25 @@ class Api:
         if action not in cmds:
             return {"ok": False, "error": "未知操作: %s" % action}
         sh = cmds[action]
+        # 鸿蒙：启动/强制停止走 aa（Ability Manager），清除数据/停用没有公开能力
+        if self._platform_of(serial) == "harmony":
+            if action == "start":
+                ability = self._harmony_entry_ability(serial, package)
+                sh = "aa start -b %s -a %s" % (package, ability)
+            elif action == "stop":
+                sh = "aa force-stop %s" % package
+            else:
+                return {"ok": False, "unsupported": True,
+                        "error": "鸿蒙设备暂不支持「%s」（无对应 bm/aa 能力）"
+                                 % {"clear": "清除数据", "disable": "停用",
+                                    "enable": "启用"}.get(action, action)}
+            guard = self._harmony_guard()
+            if guard:
+                return guard
+            r = self.hdc.shell(sh, target=serial, timeout=40)
+            action_log.record(action, r["cmd"], serial=serial, exit_code=r["exitCode"],
+                              output=(r["stdout"] or r["stderr"]).strip(), ok=r["ok"])
+            return {"ok": r["ok"], "output": (r["stdout"] or r["stderr"]).strip(), "cmd": r["cmd"]}
         # iOS 非越狱没有 am/pm，启动/停用/清数据都没有对应能力（清数据只能卸载重装）
         if self._platform_of(serial) == "ios":
             return {"ok": False, "unsupported": True,
@@ -733,6 +1272,27 @@ class Api:
                 t.status = "success"
                 t.percent = 100
                 t.phase = "卸载完成"
+                return
+            if self._platform_of(serial) == "harmony":
+                guard = self._harmony_guard()
+                if guard:
+                    t.status = "failed"
+                    t.error = guard["error"] + "（" + guard.get("hint", "") + "）"
+                    t.phase = "hdc 不可用"
+                    return
+                if keep_data:
+                    t.log("鸿蒙不支持保留数据卸载，忽略 -k")
+                t.phase = "正在卸载…"
+                t.log("hdc -t %s uninstall %s" % (serial, package))
+                r = self.hdc.run(["uninstall", package], target=serial, timeout=120)
+                out = (r["stdout"] or r["stderr"]).strip()
+                action_log.record("uninstall", r["cmd"], serial=serial,
+                                  exit_code=r["exitCode"], output=out, ok=r["ok"])
+                t.percent = 100
+                t.phase = "卸载完成" if r["ok"] else "卸载失败"
+                t.status = "success" if r["ok"] else "failed"
+                t.error = "" if r["ok"] else (out or "卸载失败（命令无输出）")
+                t.result = {"output": out}
                 return
             if self._platform_of(serial) == "ios":
                 guard = self._ios_guard()
@@ -778,7 +1338,11 @@ class Api:
         tid = self._new_task("install", "安装 %s" % os.path.basename(path))
         t = self.tasks[tid]
         t.total = os.path.getsize(path) if os.path.exists(path) else 0
-        # 同一个入口按平台分发：Android 装 apk / xapk，iOS 装 ipa
+        # 同一个入口按平台分发：Android 装 apk / xapk，iOS 装 ipa，鸿蒙装 hap
+        if self._platform_of(serial) == "harmony":
+            threading.Thread(target=self._install_harmony_worker,
+                             args=(t, serial, path), daemon=True).start()
+            return {"taskId": tid}
         if self._platform_of(serial) == "ios":
             threading.Thread(target=self._install_ios_worker,
                              args=(t, serial, path), daemon=True).start()
@@ -840,6 +1404,56 @@ class Api:
             t.status = "failed"
             t.phase = "安装失败"
             t.error = self._ios_err_text(e)
+
+    def _install_harmony_worker(self, t, serial, path):
+        """鸿蒙 hap 安装：hdc install 会自己完成「发文件 + bm install」两步。
+
+        hdc 不给可解析的进度输出，进度条按时间爬到 90% 表示"进行中"，
+        结束后以退出码 + 输出内容判成败。
+        """
+        guard = self._harmony_guard()
+        if guard:
+            t.status = "failed"
+            t.phase = "hdc 不可用"
+            t.error = guard["error"] + "（" + guard.get("hint", "") + "）"
+            return
+        name = os.path.basename(path)
+        t.phase = "正在传输并安装 hap…"
+        t.log("hdc -t %s install -r %s" % (serial, name))
+        cmd = self.hdc.build_cmd(["install", "-r", path], target=serial)
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                encoding="utf-8", errors="replace",
+                creationflags=_no_window() if IS_WIN else 0,
+            )
+        except Exception as e:  # noqa
+            t.status = "failed"
+            t.phase = "安装失败"
+            t.error = str(e)
+            return
+        start = time.time()
+        while proc.poll() is None:
+            if t.cancel:
+                proc.kill()
+                t.status = "cancelled"
+                return
+            # 时间爬坡：前 60 秒从 0 爬到 90%（大包安装不至于显示 0% 卡死）
+            t.percent = min(90, int(time.time() - start) * 3)
+            time.sleep(0.5)
+        out = (proc.stdout.read() if proc.stdout else "") or ""
+        out = out.strip()
+        failed = proc.returncode != 0 or "fail" in out.lower()
+        action_log.record("install", " ".join(cmd), serial=serial,
+                          exit_code=proc.returncode, output=out, ok=not failed)
+        t.percent = 100
+        t.phase = "安装完成" if not failed else "安装失败"
+        t.status = "success" if not failed else "failed"
+        if failed:
+            lines = [l for l in out.splitlines() if l.strip()]
+            t.error = lines[-1] if lines else "安装失败（命令无输出）"
+        t.result = {"output": out}
+        t.log(out.replace("\n", " | ") if out else "Success")
 
     @staticmethod
     def _opt_flags(options):
@@ -1133,6 +1747,22 @@ class Api:
             return {"ok": True, "path": path, "entries": [], "readable": True}
         if self._platform_of(serial) == "ios":
             return self._ios_list_dir(serial, path, bundleId)
+        if self._platform_of(serial) == "harmony":
+            hp = self._har_path(path)
+            entries, r = self.hdc.list_dir(serial, hp)
+            if not r["ok"]:
+                raw = (r["stderr"] or r["stdout"]).strip()[:300]
+                low = raw.lower()
+                if "no such file" in low:
+                    error = ("目录不存在或已被删除（%s），鸿蒙下 hdc 可见目录一般是 "
+                             "/storage/data/local/tmp" % hp)
+                elif "permission" in low:
+                    error = "该目录需要更高权限，鸿蒙 shell 无法访问（%s）" % hp
+                else:
+                    error = raw or "无法读取目录"
+                return {"ok": False, "path": hp, "entries": [], "readable": False,
+                        "error": error}
+            return {"ok": True, "path": hp, "entries": entries, "readable": True}
         entries, r = self.adb.list_dir(serial, path)
         if not r["ok"]:
             raw = (r["stderr"] or r["stdout"]).strip()[:300]
@@ -1201,6 +1831,17 @@ class Api:
             info["categories"] = []
             info["categoriesReady"] = True
             return info
+        if self._platform_of(serial) == "harmony":
+            info = self.hdc.storage_stats(serial)
+            cache = self._storage_cache or {}
+            if cache.get("serial") == serial:
+                info["categories"] = cache.get("categories", [])
+                info["categoriesReady"] = cache.get("ready", False)
+            else:
+                info["categories"] = []
+                info["categoriesReady"] = False
+                self._scan_storage(serial)
+            return info
         info = self.adb.storage_stats(serial)
         cache = self._storage_cache or {}
         if cache.get("serial") == serial:
@@ -1225,19 +1866,24 @@ class Api:
                 ("音频", "orange", ["/sdcard/Music", "/sdcard/Podcasts", "/sdcard/Ringtones"]),
                 ("下载文档", "cyan", ["/sdcard/Download", "/sdcard/Documents"]),
             ]
+            is_har = self._platform_of(serial) == "harmony"
+            if is_har:
+                # 鸿蒙没有 /sdcard：目录前缀换到 shell 可见的用户存储根
+                groups = [(l, c, [self._har_path(d) for d in ds]) for l, c, ds in groups]
             cats = []
             used_sum = 0
             try:
                 for label, cls, dirs in groups:
                     size = 0
                     for d in dirs:
-                        r = self.adb.shell("du -sk %s" % d, serial=serial, timeout=90)
+                        r = self._sh("du -sk %s" % d, serial=serial, timeout=90)
                         m = re.match(r"^(\d+)", (r["stdout"] or "").strip())
                         if m:
                             size += int(m.group(1)) * 1024
                     cats.append({"label": label, "bytes": size, "cls": cls})
                     used_sum += size
-                info = self.adb.storage_stats(serial)
+                info = self.hdc.storage_stats(serial) if is_har \
+                    else self.adb.storage_stats(serial)
                 used = info.get("used", 0)
                 cats.append({"label": "其他", "bytes": max(0, used - used_sum), "cls": "gray"})
                 self._storage_cache = {"serial": serial, "categories": cats, "ready": True}
@@ -1263,7 +1909,9 @@ class Api:
             if r.get("ok"):
                 r["path"] = target
             return r
-        r = self.adb.shell("mkdir -p '%s'" % target, serial=serial, timeout=20)
+        if self._platform_of(serial) == "harmony":
+            target = self._har_path(target)
+        r = self._sh("mkdir -p '%s'" % target, serial=serial, timeout=20)
         action_log.record("mkdir", r["cmd"], serial=serial, exit_code=r["exitCode"], ok=r["ok"])
         return {"ok": r["ok"], "path": target, "error": "" if r["ok"] else r["stderr"]}
 
@@ -1282,7 +1930,10 @@ class Api:
             if r.get("ok"):
                 r["path"] = target
             return r
-        r = self.adb.shell("mv '%s' '%s'" % (path, target), serial=serial, timeout=30)
+        if self._platform_of(serial) == "harmony":
+            path = self._har_path(path)
+            target = self._har_path(target)
+        r = self._sh("mv '%s' '%s'" % (path, target), serial=serial, timeout=30)
         action_log.record("rename", r["cmd"], serial=serial, exit_code=r["exitCode"], ok=r["ok"])
         return {"ok": r["ok"], "path": target, "error": "" if r["ok"] else r["stderr"]}
 
@@ -1305,6 +1956,15 @@ class Api:
                 if not r.get("ok"):
                     ok_all = False
                     errs.append((r.get("error") or "")[:120])
+                continue
+            if self._platform_of(serial) == "harmony":
+                p = self._har_path(p)
+                dst = self._har_path(dst)
+                r = self._sh("mv '%s' '%s'" % (p, dst), serial=serial, timeout=60)
+                action_log.record("move", r["cmd"], serial=serial, exit_code=r["exitCode"], ok=r["ok"])
+                if not r["ok"]:
+                    ok_all = False
+                    errs.append((r["stderr"] or "").strip()[:120])
                 continue
             r = self.adb.shell("mv '%s' '%s'" % (p, dst), serial=serial, timeout=60)
             action_log.record("move", r["cmd"], serial=serial, exit_code=r["exitCode"], ok=r["ok"])
@@ -1367,6 +2027,8 @@ class Api:
         t.phase = "已完成 %d/%d" % (done, len(paths))
 
     def _remove_worker(self, t, serial, paths, secure):
+        if self._platform_of(serial) == "harmony":
+            paths = [self._har_path(p) for p in paths]
         done = 0
         errs = []
         for p in paths:
@@ -1392,17 +2054,17 @@ class Api:
                 t.phase = "已完成 %d/%d" % (done, len(paths))
                 return
             if secure:
-                size = self.adb.stat_size(serial, p)
+                size = self._stat_size(serial, p)
                 blocks = max(1, min(3, int(size / (1024 * 1024)) + 1))
                 for i in range(blocks):
                     if t.cancel:
                         t.status = "cancelled"
                         return
                     t.phase = "正在覆写随机数据… (%d/%d) %s" % (i + 1, blocks, p.rsplit("/", 1)[-1])
-                    self.adb.shell("dd if=/dev/urandom of='%s' bs=1M count=1" % p,
-                                   serial=serial, timeout=120)
+                    self._sh("dd if=/dev/urandom of='%s' bs=1M count=1" % p,
+                             serial=serial, timeout=120)
                     t.percent = int((done + (i + 1) / blocks) / len(paths) * 100)
-            r = self.adb.shell("rm -rf '%s'" % p, serial=serial, timeout=60)
+            r = self._sh("rm -rf '%s'" % p, serial=serial, timeout=60)
             action_log.record("erase" if secure else "remove", r["cmd"], serial=serial,
                               exit_code=r["exitCode"], output=(r["stdout"] or r["stderr"])[:200],
                               ok=r["ok"])
@@ -1468,6 +2130,9 @@ class Api:
         t.phase = "上传完成" if not errs else "有文件失败"
 
     def _push_worker(self, t, serial, paths, remote_dir, overwrite):
+        is_har = self._platform_of(serial) == "harmony"
+        if is_har:
+            remote_dir = self._har_path(remote_dir)
         total = t.total or 1
         sent = 0
         errs = []
@@ -1497,13 +2162,16 @@ class Api:
                 t.phase = "上传完成"
                 continue
             if not overwrite:
-                r = self.adb.shell("ls '%s'" % dst, serial=serial, timeout=10)
+                r = self._sh("ls '%s'" % dst, serial=serial, timeout=10)
                 if r["ok"] and name in r["stdout"]:
                     base, ext = os.path.splitext(name)
                     dst = remote_dir.rstrip("/") + "/" + base + "_1" + ext
             t.phase = "正在上传 %s…" % name
-            t.log("adb push %s %s" % (os.path.basename(p), dst))
-            cmd = self.adb.build_cmd(["push", p, dst], serial=serial)
+            t.log(("hdc file send" if is_har else "adb push") + " %s %s" % (os.path.basename(p), dst))
+            if is_har:
+                cmd = self.hdc.build_cmd(["file", "send", p, dst], target=serial)
+            else:
+                cmd = self.adb.build_cmd(["push", p, dst], serial=serial)
             try:
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                         text=True, encoding="utf-8", errors="replace",
@@ -1518,7 +2186,7 @@ class Api:
                     proc.kill()
                     t.status = "cancelled"
                     return
-                got = self.adb.stat_size(serial, dst)
+                got = self._stat_size(serial, dst)
                 if got != last:
                     t.done = int(sent + got)
                     t.percent = min(100, int((sent + got) / total * 100))
@@ -1542,11 +2210,86 @@ class Api:
         serial = serial or self.current_serial
         tid = self._new_task("pull", "下载 %d 项" % len(remote_paths))
         t = self.tasks[tid]
-        worker = self._pull_ios_worker if self._platform_of(serial) == "ios" else self._pull_worker
+        plat = self._platform_of(serial)
+        worker = (self._pull_ios_worker if plat == "ios"
+                  else self._pull_harmony_worker if plat == "harmony"
+                  else self._pull_worker)
         threading.Thread(target=worker,
                          args=(t, serial, list(remote_paths), local_dir, bundleId),
                          daemon=True).start()
         return {"taskId": tid}
+
+    def _pull_harmony_worker(self, t, serial, paths, local_dir, bundle_id=None):
+        """鸿蒙下载：`hdc file recv`（文件/目录都支持），目录落地后照旧打 zip。
+
+        hdc 没有 exec-out，无法像 Android 那样 tar 流式下载。
+        """
+        os.makedirs(local_dir, exist_ok=True)
+        errs = []
+        har_paths = [self._har_path(p) for p in paths]
+        for i, hp in enumerate(har_paths):
+            if t.cancel:
+                t.status = "cancelled"
+                return
+            name = hp.rstrip("/").rsplit("/", 1)[-1]
+            t.phase = "正在下载 %s…" % name
+            t.log("hdc file recv %s -> %s" % (name, local_dir))
+            is_dir = self._remote_is_dir(serial, hp)
+            total = self.hdc.stat_size(serial, hp)
+            t.total = max(0, total)
+            local_path = os.path.join(local_dir, name)
+            cmd = self.hdc.build_cmd(["file", "recv", hp, local_dir], target=serial)
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        text=True, encoding="utf-8", errors="replace",
+                                        creationflags=_no_window() if IS_WIN else 0)
+            except Exception as e:  # noqa
+                errs.append(str(e))
+                continue
+            start = time.time()
+            last = -1
+            while proc.poll() is None:
+                if t.cancel:
+                    proc.kill()
+                    t.status = "cancelled"
+                    return
+                try:
+                    got = (os.path.getsize(local_path) if os.path.isfile(local_path)
+                           else self._tree_size(local_path))
+                    if got != last:
+                        t.done = got
+                        t.percent = min(99, int(got / max(1, total) * 99))
+                        t.speed = "%.1f MB/s" % (got / max(0.3, time.time() - start) / 1024 / 1024)
+                        last = got
+                except OSError:
+                    pass
+                time.sleep(0.25)
+            out = (proc.stdout.read() if proc.stdout else "") or ""
+            action_log.record("pull", " ".join(cmd), serial=serial, exit_code=proc.returncode,
+                              output=out.strip()[:200], ok=proc.returncode == 0)
+            t.log(("下载完成：" + name) if proc.returncode == 0 else ("失败：" + out.strip()[:120]))
+            if proc.returncode != 0:
+                errs.append(out.strip()[:120])
+            t.percent = int((i + 1) / len(paths) * 100)
+
+        zipped = self._zip_folders(local_dir, har_paths, t)
+        t.status = "cancelled" if t.cancel else ("success" if not errs else "failed")
+        t.error = "; ".join(errs)
+        t.percent = 100
+        t.phase = "下载完成" if not errs else "有文件失败"
+        t.result = {"localDir": local_dir, "zipped": zipped}
+
+    @staticmethod
+    def _tree_size(root):
+        """目录本地落地大小（文件夹 recv 的进度用）。"""
+        total = 0
+        for dirpath, _dirs, files in os.walk(root):
+            for fn in files:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, fn))
+                except OSError:
+                    pass
+        return total
 
     def _pull_ios_worker(self, t, serial, paths, local_dir, bundle_id=None):
         guard = self._ios_guard()
@@ -1618,6 +2361,10 @@ class Api:
                 "needRoot": True, "error": raw or plain_err[:150]}
 
     def _remote_is_dir(self, serial, path):
+        if self._platform_of(serial) == "harmony":
+            path = self._har_path(path)
+            r = self.hdc.shell("ls -ld %s" % self.adb._q(path), target=serial, timeout=15)
+            return bool(r["ok"]) and r["stdout"].lstrip().startswith("d")
         ra = self._run_as_of(path)
         if ra:
             pkg, rel = ra
@@ -1628,6 +2375,8 @@ class Api:
         return bool(r["ok"]) and r["stdout"].lstrip().startswith("d")
 
     def _remote_size(self, serial, path):
+        if self._platform_of(serial) == "harmony":
+            return self.hdc.stat_size(serial, self._har_path(path))
         ra = self._run_as_of(path)
         if ra:
             pkg, rel = ra

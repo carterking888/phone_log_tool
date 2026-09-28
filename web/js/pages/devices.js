@@ -10,6 +10,8 @@ window.devicesComponent = function () {
     list: [],
     current: "",
     detail: null,
+    /* 连接过的设备历史（后端 config.json 持久化），刷新后仍在 */
+    history: [],
     wifiAddr: "",
     wifiModal: false,
     wifiBusy: false,
@@ -48,10 +50,29 @@ window.devicesComponent = function () {
       if (!this.env.adbFound) return "未检测到";
       return this.env.serverRunning ? "已启动" : "未启动";
     },
+    /* 当前选中设备的平台 / 传输方式（详情优先，列表兜底） */
+    get curDevice() {
+      var d = this.detail;
+      if (d && d.platform) return d;
+      var list = this.list || [];
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].serial === this.current) return list[i];
+      }
+      return null;
+    },
+    get curPlatform() {
+      var d = this.curDevice;
+      return d ? (d.platform || "android") : "android";
+    },
+    get curTransport() {
+      var d = this.curDevice;
+      return d ? (d.transport || "usb") : "usb";
+    },
     get detailFields() {
       var d = this.detail;
       if (!d) return [];
       if (d.platform === "ios") return this.iosFields;
+      if (d.platform === "harmony") return this.harmonyFields;
       var rooted = d.rooted;
       var bat = d.battery || {};
       return [
@@ -83,6 +104,23 @@ window.devicesComponent = function () {
         { label: "存储占用", value: st.ok ? (used + " / " + total) : "—" }
       ];
     },
+    /* 鸿蒙详情字段：没有 root / kernel 概念，属性来自 param get */
+    get harmonyFields() {
+      var d = this.detail || {};
+      if (d.error) {
+        return [
+          { label: "设备序列号", value: d.serial, wide: true },
+          { label: "状态", value: d.error, cls: "v-warn", wide: true }
+        ];
+      }
+      return [
+        { label: "设备型号", value: d.model || "—" },
+        { label: "系统版本", value: "HarmonyOS " + (d.osVersion || "—") },
+        { label: "API 版本", value: d.apiLevel ? "API " + d.apiLevel : "—" },
+        { label: "设备名称", value: d.device || d.brand || "—" },
+        { label: "设备序列号", value: d.serial, wide: true }
+      ];
+    },
     get tipCls() {
       if (!this.env.adbFound) return "bad";
       if (this.onlineList.length === 0) return "warn";
@@ -90,6 +128,9 @@ window.devicesComponent = function () {
     },
     get tipText() {
       var cur = this.current;
+      var harmony = this.list.some(function (d) {
+        return d.serial === cur && d.platform === "harmony";
+      });
       var ios = this.list.some(function (d) {
         return d.serial === cur && d.platform === "ios";
       });
@@ -101,9 +142,20 @@ window.devicesComponent = function () {
         }
         return "未检测到 adb，也未提供 iOS 支持：请在设置中指定 platform-tools 路径，或执行 pip install pymobiledevice3 启用 iOS。";
       }
+      var curDev = this.curDevice;
+      if (curDev && curDev.platform === "harmony" && curDev.state === "unauthorized") {
+        return "鸿蒙设备未授权：请解锁手机屏幕，在弹出的「是否允许 hdc 调试」对话框点允许"
+          + "（建议勾选「始终允许使用 hdc 调试」）；没看到弹窗就拔插一次 USB 线，"
+          + "或执行 hdc kill -r 后重插。";
+      }
       if (this.onlineList.length === 0) {
         return "未检测到已授权设备：Android 请检查 USB 调试开关与数据线；"
-          + "iPhone 请在手机上点「信任此电脑」并输入锁屏密码。";
+          + "iPhone 请在手机上点「信任此电脑」并输入锁屏密码；"
+          + "鸿蒙请在设置里打开「开发者模式 - USB 调试」并在手机上允许 hdc 调试。";
+      }
+      if (harmony) {
+        return "鸿蒙设备已连接（hdc）：日志走 hilog（已尽力关闭隐私掩码，部分系统版本仍会显示 <private>）；"
+          + "应用管理支持查看 / 启动 / 强制停止 / 卸载 / 安装 .hap。";
       }
       if (ios) {
         return "iOS 设备已连接：日志走系统 syslog（实测 iOS 17+ 也可直连，取不到时才需要 tunnel）；"
@@ -132,8 +184,11 @@ window.devicesComponent = function () {
             var ic = Util.iconMeta(d.model || d.serial);
             return Object.assign({}, d, {
               iconText: ic.text, iconColor: ic.color,
+              // 鸿蒙设备用 config/log.png 作为卡片图标（本地服务映射 /config/）
+              iconImg: d.platform === "harmony" ? "/config/log.png" : "",
               platform: d.platform || "android",
-              platformText: d.platform === "ios" ? "iOS" : "Android",
+              platformText: d.platform === "ios" ? "iOS"
+                : (d.platform === "harmony" ? "HarmonyOS" : "Android"),
               stateText: { device: "在线", offline: "离线", unauthorized: "未授权",
                 "no permissions": "无权限" }[d.state] || d.state,
               stateCls: d.state === "device" ? "ok" : (d.state === "unauthorized" ? "bad" : "warn"),
@@ -149,6 +204,7 @@ window.devicesComponent = function () {
           self.current = cur;
           return self.loadDetail(app);
         })
+        .then(function () { return self.loadHistory(); })
         .catch(function (e) {
           self.loadError = e && e.message ? e.message : String(e);
         })
@@ -189,16 +245,114 @@ window.devicesComponent = function () {
       this.wifiBusy = true;
       return Util.call("connect_wireless", this.wifiAddr)
         .then(function (r) {
-          app.toast(r && r.ok ? "连接成功" : ("连接失败：" + ((r && r.output) || "未知错误")),
-            r && r.ok ? "ok" : "bad");
-          self.wifiModal = false;
-          self.wifiAddr = "";
-          return self.refresh(app);
+          if (r && r.ok) {
+            app.toast("连接成功", "ok");
+            self.wifiModal = false;
+            self.wifiAddr = "";
+            return self.refresh(app);
+          }
+          var out = (r && r.output) || "未知错误";
+          var hint = out.indexOf("Connect failed") >= 0 || out.indexOf("Fail") >= 0
+            ? "（请确认手机与电脑同一 Wi-Fi、IP:端口 与手机「无线调试」页面显示一致、手机上已点允许）"
+            : "";
+          app.toast("连接失败：" + out + " " + hint, "bad");
         })
         .catch(function (e) {
           app.toast("连接异常：" + e.message, "bad");
         })
         .then(function () { self.wifiBusy = false; });
+    },
+    /* USB 在线时一键切无线监听（鸿蒙 tmode / Android tcpip），成功后预填地址 */
+    enableWireless: function (app) {
+      var self = this;
+      this.wifiBusy = true;
+      return Util.call("enable_wireless", null)
+        .then(function (r) {
+          if (!r || !r.ok) {
+            app.toast("切换失败：" + ((r && r.output) || "未知错误"), "bad");
+            return null;
+          }
+          var addr = r.ip ? (r.ip + ":" + r.port) : "";
+          if (addr) self.wifiAddr = addr;
+          self.wifiModal = true;
+          app.toast("已切换为无线监听（端口 " + r.port + "）。拔掉 USB 线后点「连接」"
+            + (addr ? "，地址已填好" : "；获取 IP 失败，请在手机 WLAN 详情里查看 IP"), "ok");
+          return null;
+        })
+        .catch(function (e) {
+          app.toast("切换异常：" + e.message, "bad");
+        })
+        .then(function () { self.wifiBusy = false; });
+    },
+    /* 断开当前无线设备（鸿蒙 tdisconnect / adb disconnect） */
+    disconnectWireless: function (app) {
+      var self = this;
+      var addr = this.curDevice && this.curDevice.serial;
+      if (!addr) return;
+      return Util.call("disconnect_wireless", addr)
+        .then(function (r) {
+          app.toast(r && r.ok ? "已断开无线连接" : "断开失败：" + ((r && r.output) || ""),
+            r && r.ok ? "ok" : "bad");
+          return self.refresh(app);
+        })
+        .catch(function (e) {
+          app.toast("断开异常：" + e.message, "bad");
+        });
+    },
+    /* ---- 历史设备：加载（过滤掉当前仍在线的）、删除、点击回连 ---- */
+    loadHistory: function () {
+      var self = this;
+      return Util.call("device_history")
+        .then(function (hist) {
+          var curSerials = {};
+          (self.list || []).forEach(function (d) { curSerials[d.serial] = true; });
+          self.history = (hist || [])
+            .filter(function (h) { return h.serial && !curSerials[h.serial]; })
+            .map(function (h) {
+              var ic = Util.iconMeta(h.model || h.serial);
+              return Object.assign({}, h, {
+                iconText: ic.text, iconColor: ic.color,
+                iconImg: h.platform === "harmony" ? "/config/log.png" : "",
+                platformText: h.platform === "ios" ? "iOS"
+                  : (h.platform === "harmony" ? "HarmonyOS" : "Android"),
+                isWifi: /^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(h.serial || "")
+              });
+            });
+        })
+        .catch(function () { self.history = []; });
+    },
+    removeHistory: function (app, serial) {
+      var self = this;
+      return Util.call("remove_device_history", serial)
+        .then(function () {
+          self.history = self.history.filter(function (h) { return h.serial !== serial; });
+          app.toast("已删除历史记录", "ok");
+        })
+        .catch(function (e) {
+          app.toast("删除失败：" + (e && e.message ? e.message : e), "bad");
+        });
+    },
+    /* 从列表移除设备：无线设备先断开连接；离线设备隐藏；历史记录一并删除 */
+    removeDevice: function (app, serial) {
+      var self = this;
+      return Util.call("remove_device", serial)
+        .then(function () {
+          app.toast("已移除设备 " + serial, "ok");
+          return self.refresh(app);
+        })
+        .catch(function (e) {
+          app.toast("移除失败：" + (e && e.message ? e.message : e), "bad");
+        });
+    },
+    clickHistory: function (app, h) {
+      if (!h) return;
+      /* 无线地址（ip:port）直接预填到连接弹窗，一键回连 */
+      if (h.isWifi) {
+        this.wifiAddr = h.serial;
+        this.wifiModal = true;
+        return;
+      }
+      app.toast("「" + (h.model || h.serial) + "」请重新插入 USB 后刷新检测", "warn");
     },
     copySerial: function (app) {
       if (!this.detail) return;

@@ -79,22 +79,39 @@ def _ver_tuple(v):
     return tuple(int(x) for x in m.groups()) if m else None
 
 
+def next_version_from_tag():
+    """下一个版本号：最新发布 tag 的 patch +1（与 ci_version.sh 自动递增规则一致）。
+
+    例：v2.7.4 -> 2.7.5；tag 带历史遗留的 -b<run号> 后缀先剥掉再递增。
+    取不到（没 git / 不在仓库 / tag 形态异常）返回 None。
+    """
+    tag = latest_tag_version()
+    if not tag:
+        return None
+    base = tag.split("-", 1)[0]
+    parts = base.split(".")
+    if len(parts) != 3 or not all(x.isdigit() for x in parts):
+        return None
+    parts[2] = str(int(parts[2]) + 1)
+    return ".".join(parts)
+
+
 def sync_version_from_tag(api_py=None):
-    """把 core/api.py 的 APP_VERSION 对齐「最近发布的 tag」，返回 (旧值, 新值) 或 None。
+    """把 core/api.py 的 APP_VERSION 对齐「本次构建版本」（最新 tag 的 patch+1）。
 
     为什么需要：打包态界面显示的版本号是**编译进去**的 APP_VERSION，而仓库里的值只由
     CI 在 runner 上改写（不回写仓库），本地会一直停在旧值 —— 本地打出来的包写着 2.7.0，
-    GitHub 上的包却是 2.7.2，两边对不上。由 setup_pyd.py 在 Cython 编译**之前**调用
-    （版本号必须在那之前定下来），本地打包就自动跟上最新发布版。
+    GitHub 上的包却是 2.7.5，两边对不上。由 setup_pyd.py 在 Cython 编译**之前**调用，
+    本地打包就自动跟上 CI 的递增规则：上一个发布是 v2.7.4 时，本地包也是 2.7.5。
 
-    只升不降：CI 打包前 ci_version.sh 已写入「最新 tag + 1」，比任何现存 tag 都新，
-    所以 CI 上这次调用是 no-op，绝不会把版本号改小。
+    只升不降：CI 打包前 ci_version.sh 已写入「最新 tag + 1」，与这里的算法结果相同，
+    new <= old 判定直接 no-op，绝不会把 CI 的版本号改小。
     """
     path = api_py or _core("api.py")
     if not os.path.isfile(path):
         return None
-    tag = latest_tag_version()
-    if not tag:
+    new_ver = next_version_from_tag()
+    if not new_ver:
         return None
     # newline=""：原样读写，不改动行尾（LF 还是 LF，CRLF 还是 CRLF）
     with open(path, encoding="utf-8", newline="") as f:
@@ -103,12 +120,12 @@ def sync_version_from_tag(api_py=None):
     if not m:
         return None
     old = m.group(1)
-    new_t, old_t = _ver_tuple(tag), _ver_tuple(old)
+    new_t, old_t = _ver_tuple(new_ver), _ver_tuple(old)
     if new_t is None or old_t is None or new_t <= old_t:
         return None
     with open(path, "w", encoding="utf-8", newline="") as f:
-        f.write(src[:m.start(1)] + tag + src[m.end(1):])
-    return (old, tag)
+        f.write(src[:m.start(1)] + new_ver + src[m.end(1):])
+    return (old, new_ver)
 
 
 def stash():
@@ -219,6 +236,54 @@ def copy_portable_adb(src):
     for n in names:
         shutil.copy2(os.path.join(src, n), os.path.join(dst, n))
     print("[portable] adb -> %s (%s)" % (dst, ", ".join(names)))
+    return dst
+
+
+# ---------------------------------------------------------------------------
+# 便携 hdc（鸿蒙）：**可选内置**，与 adb 的必需内置不同。
+# hdc 没有稳定直链可自动下载（官方走整套 OpenHarmony SDK / DevEco），所以只做
+# 「本地放好就带进包」：
+#   ../public_settings/hdc/hdc(.exe)   与 adb 同目录约定
+#   build/_portable_hdc/hdc(.exe)      手工放置的缓存位
+# 运行时 core/hdc.py 的 find_hdc() 本就按 配置 > PATH > 便携目录 > 常见路径 找，
+# 包里没有时鸿蒙模块会提示自备 hdc —— 因此缺失只警告不报错。
+# ---------------------------------------------------------------------------
+PORTABLE_HDC_CANDIDATES = (
+    os.path.join(os.path.dirname(HERE), "public_settings", "hdc"),
+    os.path.join(HERE, "build", "_portable_hdc"),
+)
+
+
+def _hdc_exe_name():
+    return "hdc" if IS_MAC else "hdc.exe"
+
+
+def resolve_portable_hdc():
+    """确定便携 hdc 来源目录（本地有才有效）。None = 跳过（不硬失败）。"""
+    if os.environ.get("SKIP_PORTABLE_HDC") == "1":
+        print("[portable] SKIP_PORTABLE_HDC=1，跳过内置 hdc")
+        return None
+    exe = _hdc_exe_name()
+    for d in PORTABLE_HDC_CANDIDATES:
+        if os.path.isfile(os.path.join(d, exe)):
+            return d
+    return None
+
+
+def copy_portable_hdc(src):
+    """把便携 hdc 拷进产物 public_settings/hdc/（可选件：没有就提示）。"""
+    if not src:
+        print("[portable] hdc: 未内置（鸿蒙功能需目标机自备 hdc；"
+              "要内置请把 hdc 放 ../public_settings/hdc/ 后重打包，"
+              "SKIP_PORTABLE_HDC=1 可显式关闭）")
+        return None
+    dst = os.path.join(APP_DIR, "public_settings", "hdc")
+    os.makedirs(dst, exist_ok=True)
+    names = sorted(n for n in os.listdir(src)
+                   if os.path.isfile(os.path.join(src, n)))
+    for n in names:
+        shutil.copy2(os.path.join(src, n), os.path.join(dst, n))
+    print("[portable] hdc -> %s (%s)" % (dst, ", ".join(names)))
     return dst
 
 
@@ -430,6 +495,13 @@ def check():
         else:
             ok.append("便携 adb: OK (%d dll)" % len(dlls))
 
+    # 便携 hdc：可选件，未内置只提示（鸿蒙功能可选，目标机可自备或放包后补）。
+    hcd = os.path.join(APP_DIR, "public_settings", "hdc")
+    if os.path.isfile(os.path.join(hcd, _hdc_exe_name())):
+        ok.append("便携 hdc: OK")
+    else:
+        ok.append("便携 hdc: 未内置（鸿蒙功能需目标机自备 hdc）")
+
     print("\n[check]")
     for line in ok:
         print("  + %s" % line)
@@ -474,6 +546,7 @@ def main():
     # 便携 adb 是必需项：目标机大概率没装 Android SDK，包里没有 adb 就完全不可用。
     # 先在这里备好（可能要联网下载），别等 PyInstaller 跑完几分钟才发现拿不到。
     portable_src = resolve_portable_adb()
+    portable_hdc = resolve_portable_hdc()
     move_old_build()
     move_old_dist()
     moved = stash()
@@ -483,6 +556,7 @@ def main():
             print("[错误] PyInstaller 退出码 %d" % code)
             return code
         copy_portable_adb(portable_src)
+        copy_portable_hdc(portable_hdc)
         copy_helper_scripts()
     finally:
         restore(moved)

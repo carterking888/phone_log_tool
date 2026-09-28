@@ -3,7 +3,7 @@
 
 数据来源（项目根目录 config/ 下；打包后从 sys._MEIPASS 取）：
 - config/android_perms_zh.json   368 条 Manifest.permission 权限中文化（dangerous/normal/signature）
-- config/android_pkg_names.json  359 条常见包名 -> 中文应用名（另含 22 条前缀兜底规则）
+- config/android_pkg_names.json  654 条常见包名 -> 中文应用名（另含 28 条前缀兜底规则）
 
 设计原则：
 - 两个文件都是**可选**的。缺失/损坏时查询一律返回 None，调用方回退到原名，

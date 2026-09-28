@@ -412,6 +412,25 @@ class Adb:
         return out
 
     # ------------------------------------------------------------------ 文件
+    # ls 常见错误标记（hdc/部分 shell 失败也返回 exit 0，错误行打在 stdout 上）
+    _LS_ERR_MARKERS = (
+        "no such file or directory",
+        "permission denied",
+        "operation not permitted",
+        "not a directory",
+    )
+
+    @staticmethod
+    def ls_error(stdout):
+        """检测 ls 输出中混入的错误行，返回首条错误行文本；正常输出返回 None。"""
+        for line in stdout.splitlines():
+            s = line.strip().lower()
+            if not s:
+                continue
+            if s.startswith("ls:") or any(m in s for m in Adb._LS_ERR_MARKERS):
+                return line.strip()
+        return None
+
     def list_dir(self, serial, path, timeout=20):
         """ls -la 解析。
 
@@ -423,6 +442,11 @@ class Adb:
         r = self.shell(cmd, serial=serial, timeout=timeout)
         if not r["ok"]:
             return [], r
+        # hdc 的 shell 失败也 exit 0，`ls: ...: No such file or directory`
+        # 这类错误行会混在 stdout 里，先拦掉再解析
+        err_line = self.ls_error(r["stdout"])
+        if err_line:
+            return [], Result(False, 0, r["stdout"], err_line, r["cmd"])
         return self._parse_ls(r["stdout"], path), r
 
     def list_dir_runas(self, serial, package, rel, base_path, timeout=20):
@@ -439,7 +463,11 @@ class Adb:
 
     @staticmethod
     def _parse_ls(stdout, base_path):
-        """解析 `ls -la` 输出为条目列表；base_path 为条目 path 的绝对前缀。"""
+        """解析 `ls -la` 输出为条目列表；base_path 为条目 path 的绝对前缀。
+
+        只认 ls 条目格式（权限位首字符 ∈ -dlbcsp），错误行/噪声行直接丢弃，
+        避免把 `ls: xxx: No such file or directory` 解析成空名假条目。
+        """
         entries = []
         for line in stdout.splitlines():
             line = line.rstrip()
@@ -448,7 +476,12 @@ class Adb:
             parts = line.split(None, 7)
             if len(parts) < 7:
                 continue
-            perm, _, owner, group, size, date1, date2 = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+            perm = parts[0]
+            # 权限位至少 10 字符（如 drwxrwx--x）；`ls:` 前缀的错误行首字符
+            # 恰好是 'l'（符号链接位），靠长度一并拦掉
+            if len(perm) < 10 or perm[0] not in "-dlbcsp":
+                continue
+            _, owner, group, size, date1, date2 = parts[1:7]
             name = parts[7] if len(parts) > 7 else ""
             if name in (".", ".."):
                 continue

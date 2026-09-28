@@ -85,6 +85,24 @@ else
     "$ADB_DST" version | sed 's/^/    /'
 fi
 
+echo "==> 4.6/6 内置 hdc（鸿蒙，可选）"
+# 与 adb 不同：hdc 没有稳定直链可自动下载（官方走整套 OpenHarmony SDK / DevEco），
+# 所以只做「本地 ../public_settings/hdc/hdc 存在就拷进包」，没有只提示不报错。
+# 运行时 core/hdc.py 的 find_hdc() 按配置 > PATH > 便携目录 > 常见路径查找。
+HDC_DST="$APP/Contents/MacOS/public_settings/hdc/hdc"
+if [ -x "$HDC_DST" ]; then
+    echo "    已存在，跳过"
+elif [ "${SKIP_PORTABLE_HDC:-0}" = "1" ]; then
+    echo "    [warn] SKIP_PORTABLE_HDC=1，跳过内置（目标机需自备 hdc）"
+elif [ -f "../public_settings/hdc/hdc" ]; then
+    mkdir -p "$(dirname "$HDC_DST")"
+    cp "../public_settings/hdc/hdc" "$HDC_DST"
+    chmod +x "$HDC_DST"
+    echo "    hdc -> $HDC_DST"
+else
+    echo "    [warn] hdc 未内置（../public_settings/hdc/hdc 不存在）：鸿蒙功能需目标机自备 hdc"
+fi
+
 echo "==> 5/6 解除隔离属性 + ad-hoc 签名"
 # 本地产物也会被标记 quarantine，导致「已损坏，无法打开」
 xattr -cr "$APP" 2>/dev/null || true

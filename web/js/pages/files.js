@@ -45,20 +45,33 @@ window.filesComponent = function () {
     get isIos() {
       return !!(window.AdbApp && window.AdbApp.isIos);
     },
-    /* iOS 走 AFC：根就是 "/"，能访问的只有媒体域，没有 /sdcard、/data */
+    get isHarmony() {
+      return !!(window.AdbApp && window.AdbApp.isHarmony);
+    },
+    /* 鸿蒙没有 /sdcard：shell 可见的用户存储根是 /storage/data/local */
     get roots() {
-      return this.isIos
-        ? [{ path: "/", label: "/（媒体域）", locked: false }]
-        : [
-            { path: "/sdcard", label: "/sdcard", locked: false },
-            { path: "/data", label: "/data", locked: true },
-            { path: "/storage/emulated", label: "/storage/emulated", locked: false }
-          ];
+      if (this.isIos) {
+        return [{ path: "/", label: "/（媒体域）", locked: false }];
+      }
+      if (this.isHarmony) {
+        return [
+          { path: "/storage/data/local", label: "/storage/data/local（用户目录）", locked: false },
+          { path: "/", label: "/", locked: true }
+        ];
+      }
+      return [
+        { path: "/sdcard", label: "/sdcard", locked: false },
+        { path: "/data", label: "/data", locked: true },
+        { path: "/storage/emulated", label: "/storage/emulated", locked: false }
+      ];
     },
     get quickDirs() {
-      return this.isIos
-        ? ["/DCIM", "/Books", "/Downloads", "/Photos"]
-        : ["/sdcard/Download", "/sdcard/DCIM", "/sdcard/Pictures", "/sdcard/Android/adb_logs"];
+      if (this.isIos) return ["/DCIM", "/Books", "/Downloads", "/Photos"];
+      if (this.isHarmony) {
+        return ["/storage/data/local/Download", "/storage/data/local/Documents",
+          "/storage/data/local/DCIM", "/storage/data/local/Pictures"];
+      }
+      return ["/sdcard/Download", "/sdcard/DCIM", "/sdcard/Pictures", "/sdcard/Android/adb_logs"];
     },
     get iosTip() {
       return this.isIos && !this.inApp
@@ -226,7 +239,7 @@ window.filesComponent = function () {
         app.toast("请先选择设备", "warn");
         return Promise.resolve();
       }
-      // 换平台时旧路径一定不通：Android↔iOS 各自回到自己的根
+      // 换平台时旧路径一定不通：Android/HarmonyOS/iOS 各自回到自己的根
       if (this.isIos && this.currentPath !== "/" &&
           (this.currentPath === "/data" ||
            this.currentPath.indexOf("/sdcard") === 0 ||
@@ -234,7 +247,15 @@ window.filesComponent = function () {
         this.currentPath = "/";
         this.uploadTarget = "/";
         this.appBundle = "";
-      } else if (!this.isIos && this.currentPath === "/") {
+      } else if (this.isHarmony &&
+          (this.currentPath === "/sdcard" || this.currentPath.indexOf("/sdcard/") === 0)) {
+        this.currentPath = "/storage/data/local" + this.currentPath.slice("/sdcard".length);
+        if ((this.uploadTarget || "").indexOf("/sdcard") === 0) {
+          this.uploadTarget = "/storage/data/local" + this.uploadTarget.slice("/sdcard".length);
+        }
+        this.appBundle = "";
+      } else if (!this.isIos && !this.isHarmony &&
+          (this.currentPath === "/" || this.currentPath.indexOf("/storage/data/local") === 0)) {
         this.currentPath = "/sdcard";
         this.appBundle = "";
       }
